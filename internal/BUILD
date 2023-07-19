@@ -22,6 +22,18 @@ package(
 )
 
 cc_library(
+    name = "introspection_xrnic",
+    hdrs = ["introspection_xrnic.h"],
+    deps = [
+        ":introspection_registrar",
+        "//public:introspection",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@libibverbs",
+    ],
+    alwayslink = 1,
+)
+
+cc_library(
     name = "introspection_irdma",
     hdrs = ["introspection_irdma.h"],
     deps = [

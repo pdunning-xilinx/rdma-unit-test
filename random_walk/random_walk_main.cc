@@ -22,6 +22,7 @@
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/time/time.h"
+#include "internal/introspection_xrnic.h"
 #include "internal/introspection_mlx4.h"
 #include "internal/introspection_mlx5.h"
 #include "internal/introspection_rxe.h"

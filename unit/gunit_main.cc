@@ -25,6 +25,7 @@
 #include "internal/introspection_mlx4.h"
 #include "internal/introspection_mlx5.h"
 #include "internal/introspection_rxe.h"
+#include "internal/introspection_xrnic.h"
 
 int main(int argc, char* argv[]) {
   testing::InitGoogleTest(&argc, argv);
@@ -37,6 +38,7 @@ int main(int argc, char* argv[]) {
   absl::ParseCommandLine(argc, argv);
 
   // Register supported NIC's
+  rdma_unit_test::IntrospectionXRnic::Register();
   rdma_unit_test::IntrospectionIrdma::Register();
   rdma_unit_test::IntrospectionIonic::Register();
   rdma_unit_test::IntrospectionMlx4::Register();

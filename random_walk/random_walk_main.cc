@@ -25,6 +25,7 @@
 #include "internal/introspection_mlx4.h"
 #include "internal/introspection_mlx5.h"
 #include "internal/introspection_rxe.h"
+#include "internal/introspection_xrnic.h"
 #include "public/introspection.h"
 #include "random_walk/flags.h"
 #include "random_walk/internal/multi_node_orchestrator.h"

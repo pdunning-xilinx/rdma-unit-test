@@ -102,7 +102,7 @@ TEST_F(ThreadedTest, CreateDestroyAh) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([this, setup, thread_id, &results, kAhPerThread]() {
-      for (int i = 0; i < kAhPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kAhPerThread); ++i) {
         ibv_ah_attr ah_attr = AhAttribute().GetAttribute(
             setup.port_attr.port, setup.port_attr.gid_index,
             setup.port_attr.gid);
@@ -133,7 +133,7 @@ TEST_F(ThreadedTest, CreateDestroyCq) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([setup, thread_id, &results, kCqPerThread]() {
-      for (int i = 0; i < kCqPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kCqPerThread); ++i) {
         ibv_cq* cq = ibv_create_cq(setup.context, 10, nullptr, nullptr, 0);
         ASSERT_THAT(cq, NotNull());
         results[thread_id][i] = ibv_destroy_cq(cq);
@@ -164,7 +164,7 @@ TEST_F(ThreadedTest, CreateDestroyCqEx) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([setup, thread_id, &results, kCqPerThread]() {
-      for (int i = 0; i < kCqPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kCqPerThread); ++i) {
         ibv_cq_init_attr_ex cq_attr{.cqe = 10};
         ibv_cq_ex* cq = ibv_create_cq_ex(setup.context, &cq_attr);
         ASSERT_THAT(cq, NotNull());
@@ -193,7 +193,7 @@ TEST_F(ThreadedTest, AllocDeallocPd) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([setup, thread_id, &results, kPdPerThread]() {
-      for (int i = 0; i < kPdPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kPdPerThread); ++i) {
         ibv_pd* pd = ibv_alloc_pd(setup.context);
         ASSERT_THAT(pd, NotNull());
         results[thread_id][i] = ibv_dealloc_pd(pd);
@@ -221,7 +221,7 @@ TEST_F(ThreadedTest, RegDeregMr) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([this, setup, thread_id, &results, kMrPerThread]() {
-      for (int i = 0; i < kMrPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kMrPerThread); ++i) {
         ibv_mr* mr = ibv_.extension().RegMr(
             setup.pd, setup.buffer,
             IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE |
@@ -253,7 +253,7 @@ TEST_F(ThreadedTest, AllocDeallocMw) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([setup, thread_id, &results, kMwPerThread]() {
-      for (int i = 0; i < kMwPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kMwPerThread); ++i) {
         ibv_mw_type type = IBV_MW_TYPE_1;
         if (Introspection().SupportsType2() && (i % 2 == 0)) {
           type = IBV_MW_TYPE_2;
@@ -285,7 +285,7 @@ TEST_F(ThreadedTest, CreateDestroyQp) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([this, setup, thread_id, &results, kQpPerThread]() {
-      for (int i = 0; i < kQpPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kQpPerThread); ++i) {
         ibv_qp_init_attr attr =
             QpInitAttribute().GetAttribute(setup.cq, setup.cq, IBV_QPT_RC);
         ibv_qp* qp = ibv_.extension().CreateQp(setup.pd, attr);
@@ -313,7 +313,7 @@ TEST_F(ThreadedTest, CreateDestroySrq) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([setup, thread_id, &results, kSrqPerThread]() {
-      for (int i = 0; i < kSrqPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kSrqPerThread); ++i) {
         ibv_srq_init_attr init_attr{.attr = verbs_util::DefaultSrqAttr()};
         ibv_srq* srq = ibv_create_srq(setup.pd, &init_attr);
         ASSERT_THAT(srq, NotNull());
@@ -342,7 +342,7 @@ TEST_F(ThreadedTest, CreateAh) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([this, setup, thread_id, &ahs, kAhPerThread]() {
-      for (int i = 0; i < kAhPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kAhPerThread); ++i) {
         ibv_ah_attr ah_attr = AhAttribute().GetAttribute(
             setup.port_attr.port, setup.port_attr.gid_index,
             setup.port_attr.gid);
@@ -372,7 +372,7 @@ TEST_F(ThreadedTest, CreateCq) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([setup, thread_id, &cqs, kCqPerThread]() {
-      for (int i = 0; i < kCqPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kCqPerThread); ++i) {
         cqs[thread_id][i] =
             ibv_create_cq(setup.context, 10, nullptr, nullptr, 0);
       }
@@ -403,7 +403,7 @@ TEST_F(ThreadedTest, CreateCqEx) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([setup, thread_id, &cqs_ex, kCqPerThread]() {
-      for (int i = 0; i < kCqPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kCqPerThread); ++i) {
         ibv_cq_init_attr_ex cq_attr{.cqe = 10};
         cqs_ex[thread_id][i] = ibv_create_cq_ex(setup.context, &cq_attr);
       }
@@ -431,7 +431,7 @@ TEST_F(ThreadedTest, AllocPd) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([setup, thread_id, &pds, kPdPerThread]() {
-      for (int i = 0; i < kPdPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kPdPerThread); ++i) {
         pds[thread_id][i] = ibv_alloc_pd(setup.context);
       }
     });
@@ -489,7 +489,7 @@ TEST_F(ThreadedTest, AllocMw) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([setup, thread_id, &mws, kMwPerThread]() {
-      for (int i = 0; i < kMwPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kMwPerThread); ++i) {
         ibv_mw_type type = IBV_MW_TYPE_1;
         if (Introspection().SupportsType2() && (i % 2 == 0)) {
           type = IBV_MW_TYPE_2;
@@ -520,7 +520,7 @@ TEST_F(ThreadedTest, CreateQp) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([this, setup, thread_id, &qps, kQpPerThread]() {
-      for (int i = 0; i < kQpPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kQpPerThread); ++i) {
         ibv_qp_init_attr attr =
             QpInitAttribute().GetAttribute(setup.cq, setup.cq, IBV_QPT_RC);
         qps[thread_id][i] = ibv_.extension().CreateQp(setup.pd, attr);
@@ -549,7 +549,7 @@ TEST_F(ThreadedTest, CreateSrq) {
 
   for (int thread_id = 0; thread_id < kThreadCount; ++thread_id) {
     pool.Add([setup, thread_id, &srqs, kSrqPerThread]() {
-      for (int i = 0; i < kSrqPerThread; ++i) {
+      for (int i = 0; i < static_cast<int>(kSrqPerThread); ++i) {
         ibv_srq_init_attr init_attr{.attr = verbs_util::DefaultSrqAttr()};
         srqs[thread_id][i] = ibv_create_srq(setup.pd, &init_attr);
       }

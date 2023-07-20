@@ -1,0 +1,2 @@
+REVIEWBOARD_URL = "https://reviewboard.xilinx.com/"
+REPOSITORY = "xrnic/xr_ts"

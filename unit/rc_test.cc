@@ -98,7 +98,7 @@ class LoopbackRcQpTest : public LoopbackFixture {
     qp_init_attr.set_max_inline_data(kInlineTestSize[0]);
     ASSIGN_OR_RETURN(Client local,
                      CreateClient(IBV_QPT_RC, kPages, qp_init_attr));
-    for (int idx = 1; idx < kInlineTestSize.size(); ++idx) {
+    for (int idx = 1; idx < static_cast<int>(kInlineTestSize.size()); ++idx) {
       ibv_qp_init_attr init_attr =
           qp_init_attr.set_max_inline_data(kInlineTestSize[idx])
               .GetAttribute(local.cq, local.cq, IBV_QPT_RC);

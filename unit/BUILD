@@ -413,6 +413,7 @@ cc_library(
     testonly = 1,
     srcs = ["gunit_main.cc"],
     deps = [
+        "//internal:introspection_xrnic",
         "//internal:introspection_mlx4",
         "//internal:introspection_mlx5",
         "//internal:introspection_rxe",

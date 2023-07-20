@@ -67,6 +67,7 @@ cc_binary(
     srcs = ["random_walk_main.cc"],
     deps = [
         ":flags",
+        "//internal:introspection_xrnic",
         "//internal:introspection_mlx4",
         "//internal:introspection_mlx5",
         "//internal:introspection_rxe",

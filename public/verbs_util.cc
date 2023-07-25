@@ -420,11 +420,13 @@ bool ExpectNoExtendedCompletion(ibv_cq_ex* cq, absl::Duration timeout) {
 
 void PrintCompletion(const ibv_wc& completion) {
   LOG(INFO) << "Completion: ";
-  //LOG(INFO) << "  status = " << magic_enum::enum_name(completion.status);
+  LOG(INFO) << "  status = " << magic_enum::enum_name(completion.status);
   LOG(INFO) << "  vendor_err = " << completion.vendor_err;
   LOG(INFO) << "  wr_id = " << completion.wr_id;
   if (completion.status == IBV_WC_SUCCESS) {
-    //LOG(INFO) << "  opcode = " << magic_enum::enum_name(completion.opcode);
+    // magic_enum::enum_name can't be used as the enum value goes beyond
+    // MAGIC_ENUM_RANGE_MAX (128)
+    LOG(INFO) << "  opcode = " << completion.opcode;
   }
   LOG(INFO) << "  qp_num = " << completion.qp_num;
 }

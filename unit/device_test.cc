@@ -13,21 +13,28 @@
 // limitations under the License.
 
 #include <errno.h>
+#include <netinet/in.h>
 
 #include <cstdlib>
 #include <thread>  // NOLINT
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "glog/logging.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "absl/status/statusor.h"
 #include "infiniband/verbs.h"
 #include "public/introspection.h"
 #include "public/rdma_memblock.h"
 #include "public/status_matchers.h"
 #include "public/verbs_helper_suite.h"
 #include "unit/rdma_verbs_fixture.h"
+
+// ntoh for 64-bit value is not available in netinet/in.h
+#define ntohll(x)  \
+  ((1 == ntohl(1)) \
+       ? (x)       \
+       : ((uint64_t)ntohl((x)&0xFFFFFFFF) << 32) | ntohl((x) >> 32))
 
 namespace rdma_unit_test {
 
@@ -60,6 +67,22 @@ TEST_F(DeviceTest, Open) {
     ASSERT_THAT(context, NotNull());
     EXPECT_EQ(context->device, device);
     ASSERT_EQ(ibv_close_device(context), 0);
+  }
+  ibv_free_device_list(devices);
+}
+
+TEST_F(DeviceTest, GetDeviceGuid) {
+  int num_devices = 0;
+  ibv_device** devices = ibv_get_device_list(&num_devices);
+  ASSERT_THAT(devices, NotNull());
+  ASSERT_GE(num_devices, 1);
+
+  for (int i = 0; i < num_devices; ++i) {
+    ibv_device* device = devices[i];
+    ASSERT_THAT(device, NotNull());
+    uint64_t guid = (uint64_t)ntohll(ibv_get_device_guid(device));
+    LOG(INFO) << "Device:" << device->name << " GUID:" << std::hex << guid;
+    ASSERT_NE(guid, 0);
   }
   ibv_free_device_list(devices);
 }

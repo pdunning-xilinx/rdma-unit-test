@@ -250,6 +250,11 @@ absl::StatusOr<std::pair<ibv_wc_status, ibv_wc_status>> ExecuteSendRecv(
     ibv_qp* src_qp, ibv_qp* dst_qp, absl::Span<uint8_t> src_buffer,
     ibv_mr* src_mr, absl::Span<uint8_t> dst_buffer, ibv_mr* dst_mr);
 
+absl::StatusOr<std::pair<ibv_wc_status, ibv_wc_status>> TwoSgeSendRecv(
+    ibv_qp* src_qp, ibv_qp* dst_qp, absl::Span<uint8_t> src_buffer,
+    ibv_mr* src_mr, absl::Span<uint8_t> dst_buffer_1, ibv_mr* dst_mr_1,
+    absl::Span<uint8_t> dst_buffer_2, ibv_mr* dst_mr_2);
+
 // Opens device. If device_name is not empty, tries to open the first device
 // with the name; else, tries to open devices[0]. Returns the context. This
 // function, OpenUntrackedDevice(), is mainly used as an internal util function.

@@ -51,6 +51,7 @@ class AccessTestFixture : public RdmaVerbsFixture {
     ibv_pd* pd;
     RdmaMemBlock src_buffer;
     RdmaMemBlock dst_buffer;
+    RdmaMemBlock dst_buffer_2;
     ibv_cq* src_cq;
     ibv_cq* dst_cq;
     ibv_qp* src_qp;
@@ -168,6 +169,30 @@ class MessagingAccessTest : public AccessTestFixture {
                                     src_mr, setup.dst_buffer.span(), dst_mr),
         IsOkAndHolds(Pair(src_status_expected, dst_status_expected)));
   }
+
+  void ExecuteTwoSgeTest(BasicSetup setup, int src_mr_access, int dst_mr_access,
+                         int dst_mr_access_2, ibv_wc_status src_status_expected,
+                         ibv_wc_status dst_status_expected) {
+    //Allocate memory to second  buffer on remote.
+    setup.dst_buffer_2 = ibv_.AllocBuffer(/*pages=*/2);
+    ibv_mr* src_mr = ibv_.RegMr(setup.pd, setup.src_buffer, src_mr_access);
+    ASSERT_THAT(src_mr, NotNull());
+    ibv_mr* dst_mr = ibv_.RegMr(setup.pd, setup.dst_buffer, dst_mr_access);
+    ASSERT_THAT(dst_mr, NotNull());
+    ibv_mr* dst_mr_2 = ibv_.RegMr(setup.pd, setup.dst_buffer_2, dst_mr_access_2);
+    ASSERT_THAT(dst_mr_2, NotNull());
+    ibv_qp* src_qp = ibv_.CreateQp(setup.pd, setup.src_cq);
+    ASSERT_THAT(src_qp, NotNull());
+    ibv_qp* dst_qp = ibv_.CreateQp(setup.pd, setup.dst_cq);
+    ASSERT_THAT(dst_qp, NotNull());
+    ASSERT_THAT(ibv_.SetUpLoopbackRcQps(src_qp, dst_qp, setup.port_attr),
+                IsOk());
+    EXPECT_THAT(
+	verbs_util::TwoSgeSendRecv(src_qp, dst_qp, setup.src_buffer.span(),
+                                   src_mr, setup.dst_buffer.span(), dst_mr,
+                                   setup.dst_buffer_2.span(), dst_mr_2),
+        IsOkAndHolds(Pair(src_status_expected, dst_status_expected)));
+  }
 };
 
 TEST_F(MessagingAccessTest, AllAccess) {
@@ -192,6 +217,26 @@ TEST_F(MessagingAccessTest, MissingDstRemoteWrite) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ExecuteTest(setup, kMrAccessAll, kMrAccessAll & ~IBV_ACCESS_REMOTE_WRITE,
               IBV_WC_SUCCESS, IBV_WC_SUCCESS);
+}
+
+TEST_F(MessagingAccessTest, MinimalAccess) {
+  ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
+  //Local read is always enabled on the MR by default.
+  ExecuteTest(setup, 0, IBV_ACCESS_LOCAL_WRITE,
+              IBV_WC_SUCCESS, IBV_WC_SUCCESS);
+}
+
+TEST_F(MessagingAccessTest, TwoSgeValidAccess) {
+  ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
+  ExecuteTwoSgeTest(setup, kMrAccessAll, kMrAccessAll,
+                    kMrAccessAll, IBV_WC_SUCCESS, IBV_WC_SUCCESS);
+}
+
+TEST_F(MessagingAccessTest, TwoSgeMixedAccess) {
+  ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
+  ExecuteTwoSgeTest(setup, kMrAccessAll, kMrAccessAll,
+                    IBV_ACCESS_MW_BIND | IBV_ACCESS_REMOTE_READ,
+                    IBV_WC_SUCCESS, IBV_WC_LOC_PROT_ERR);
 }
 
 // The testsuite define a parameterized tests to test RDMA READ/WRITE access

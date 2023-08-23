@@ -45,6 +45,11 @@ class IntrospectionXRnic : public NicIntrospection {
   const absl::flat_hash_map<TestcaseKey, std::string>& GetDeviations()
       const override {
     static const absl::flat_hash_map<TestcaseKey, std::string> deviations{
+        /* XRMOD-365 Model does not report errors to host */
+        {{"MessagingAccessTest", "MissingDstLocalWrite"},
+         "Model does not report errors to host currently"},
+        {{"MessagingAccessTest", "TwoSgeMixedAccess"},
+         "Model does not report errors to host currently"},
         /* XRMOD-268 Model wont report errors to host */
         {{"PdRcLoopbackMrTest", "SendMrOtherPdLocal"}, ""},
         {{"PdRcLoopbackMrTest", "SendMrOtherPdRemote"}, ""},

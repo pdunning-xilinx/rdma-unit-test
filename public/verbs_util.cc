@@ -615,6 +615,40 @@ absl::StatusOr<std::pair<ibv_wc_status, ibv_wc_status>> ExecuteSendRecv(
   return std::make_pair(src_completion.status, dst_completion.status);
 }
 
+absl::StatusOr<std::pair<ibv_wc_status, ibv_wc_status>> TwoSgeSendRecv(
+    ibv_qp* src_qp, ibv_qp* dst_qp, absl::Span<uint8_t> src_buffer,
+    ibv_mr* src_mr, absl::Span<uint8_t> dst_buffer_1, ibv_mr* dst_mr_1,
+    absl::Span<uint8_t> dst_buffer_2, ibv_mr* dst_mr_2) {
+  ibv_sge dst_sge[2] = {{CreateSge(dst_buffer_1, dst_mr_1)},
+                        {CreateSge(dst_buffer_2, dst_mr_2)}};
+  ibv_sge src_sge = CreateSge(src_buffer, src_mr);
+  ibv_wc src_completion, dst_completion;
+  int i;
+  for (i = 0; i < 2; i++) {
+    // The for loop creates 2 send and 2 receive work requests.
+    // In order to maintain unique values of the work request id across 4
+    // requests, using expressions i*2 and (i*2)+1, below.
+    ibv_recv_wr recv =
+        CreateRecvWr(/*wr_id=*/i * 2, &dst_sge[i], /*num_sge=*/1);
+    PostRecv(dst_qp, recv);
+    ibv_send_wr send =
+        CreateSendWr(/*wr_id=*/(i * 2) + 1, &src_sge, /*num_sge=*/1);
+    PostSend(src_qp, send);
+
+    ASSIGN_OR_RETURN(src_completion, WaitForCompletion(src_qp->send_cq));
+    ASSIGN_OR_RETURN(dst_completion, WaitForCompletion(dst_qp->recv_cq));
+    if (src_completion.status != IBV_WC_SUCCESS ||
+        dst_completion.status != IBV_WC_SUCCESS) {
+      goto label;
+    } else {
+      EXPECT_EQ(IBV_WC_SEND, src_completion.opcode);
+      EXPECT_EQ(IBV_WC_RECV, dst_completion.opcode);
+    }
+  }
+label:
+  return std::make_pair(src_completion.status, dst_completion.status);
+}
+
 absl::StatusOr<ibv_context*> OpenUntrackedDevice(
     const std::string device_name) {
   ibv_device** devices = nullptr;

@@ -30,6 +30,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/synchronization/barrier.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -156,7 +157,8 @@ TEST_F(CqTest, AboveMaxCompVector) {
 // TODO(author1): Test lookup/delete with a different kind of object.
 // TODO(author1): (likely in a different test) messing with comp vectors.
 
-class CqBatchOpTest : public BatchOpFixture {
+class CqBatchOpTest : public BatchOpFixture,
+                      public testing::WithParamInterface</*num_qps*/ int> {
  protected:
   // Wait for |count| completions, and verify that:
   // (1) Completions come back with status IBV_WC_SUCCESS.
@@ -178,10 +180,10 @@ class CqBatchOpTest : public BatchOpFixture {
   }
 };
 
-TEST_F(CqBatchOpTest, SendSharedCq) {
+TEST_P(CqBatchOpTest, WriteSharedCq) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ibv_cq* cq = ibv_.CreateCq(setup.context);
-  static constexpr int kQueuePairCount = 2;
+  const int kQueuePairCount = GetParam();
   const int writes_per_queue_pair = (cq->cqe - 10) / kQueuePairCount;
   const int total_completions = writes_per_queue_pair * kQueuePairCount;
   ASSERT_OK_AND_ASSIGN(
@@ -194,11 +196,11 @@ TEST_F(CqBatchOpTest, SendSharedCq) {
 }
 
 // 2 CQs posting recv completions to a single completion queue.
-TEST_F(CqBatchOpTest, RecvSharedCq) {
+TEST_P(CqBatchOpTest, SendRecvSharedCq) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ibv_cq* send_cq = ibv_.CreateCq(setup.context);
   ibv_cq* recv_cq = ibv_.CreateCq(setup.context);
-  static constexpr int kQueuePairCount = 2;
+  const int kQueuePairCount = GetParam();
   const int sends_per_queue_pair = (recv_cq->cqe - 10) / kQueuePairCount;
   const int total_completions = sends_per_queue_pair * kQueuePairCount;
   ASSERT_OK_AND_ASSIGN(
@@ -213,7 +215,14 @@ TEST_F(CqBatchOpTest, RecvSharedCq) {
   ThreadedSubmission(qp_pairs, sends_per_queue_pair,
                      [&setup, this](QpPair& qp) { QueueSend(setup, qp); });
   WaitForAndVerifyCompletions(recv_cq, total_completions);
+  WaitForAndVerifyCompletions(send_cq, total_completions);
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    SharedCq, CqBatchOpTest, testing::Values(1, 10, 100),
+    [](const testing::TestParamInfo<CqBatchOpTest::ParamType>& info) {
+      return absl::StrFormat("%dQps", info.param);
+    });
 
 class CqOverflowTest : public CqBatchOpTest {
  protected:

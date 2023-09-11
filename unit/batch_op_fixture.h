@@ -62,7 +62,7 @@ class BatchOpFixture : public RdmaVerbsFixture {
     ibv_mr* dst_mr;
   };
 
-  enum class WorkType : uint8_t { kSend, kWrite };
+  enum class WorkType : uint8_t { kSend, kWrite, kRead };
 
   absl::StatusOr<BasicSetup> CreateBasicSetup();
 
@@ -74,6 +74,9 @@ class BatchOpFixture : public RdmaVerbsFixture {
 
   // Posts recv WQE.
   int QueueRecv(BasicSetup& setup, QpPair& qp);
+
+  // Posts read WQE.
+  int QueueRead(BasicSetup& setup, QpPair& qp);
 
   // Post a Send or Write WR to a QP. The WR uses a 1-byte buffer at byte 1,
   // then byte 2, and so on.

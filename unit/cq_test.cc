@@ -218,6 +218,21 @@ TEST_P(CqBatchOpTest, SendRecvSharedCq) {
   WaitForAndVerifyCompletions(send_cq, total_completions);
 }
 
+TEST_P(CqBatchOpTest, ReadSharedCq) {
+  ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
+  ibv_cq* cq = ibv_.CreateCq(setup.context);
+  const int kQueuePairCount = GetParam();
+  const int reads_per_queue_pair = (cq->cqe - 10) / kQueuePairCount;
+  const int total_completions = reads_per_queue_pair * kQueuePairCount;
+  ASSERT_OK_AND_ASSIGN(
+      std::vector<QpPair> qp_pairs,
+      CreateTestQpPairs(setup, cq, cq, reads_per_queue_pair, kQueuePairCount));
+  ThreadedSubmission(
+      qp_pairs, reads_per_queue_pair,
+      [&setup, this](QpPair& qp_pair) { QueueRead(setup, qp_pair); });
+  WaitForAndVerifyCompletions(cq, total_completions);
+}
+
 INSTANTIATE_TEST_SUITE_P(
     SharedCq, CqBatchOpTest,
     testing::Values(1, 10, 100),

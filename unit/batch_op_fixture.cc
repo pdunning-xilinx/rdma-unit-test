@@ -67,6 +67,10 @@ int BatchOpFixture::QueueWrite(BasicSetup& setup, QpPair& qp) {
   return QueueWork(setup, qp, WorkType::kWrite);
 }
 
+int BatchOpFixture::QueueRead(BasicSetup& setup, QpPair& qp) {
+  return QueueWork(setup, qp, WorkType::kRead);
+}
+
 int BatchOpFixture::QueueRecv(BasicSetup& setup, QpPair& qp) {
   uint32_t wr_id = qp.next_recv_wr_id++;
   DCHECK_LT(wr_id, setup.dst_memblock.size());
@@ -96,6 +100,14 @@ int BatchOpFixture::QueueWork(BasicSetup& setup, QpPair& qp,
       auto dst_buffer =
           qp.dst_buffer.subspan(wr_id, 1);  // use wr_id as index to the buffer.
       wqe = verbs_util::CreateWriteWr(wr_id, &sge, /*num_sge=*/1,
+                                      dst_buffer.data(), setup.dst_mr->rkey);
+      break;
+    }
+    case WorkType::kRead: {
+      DCHECK_LT(wr_id, setup.dst_memblock.size());
+      auto dst_buffer =
+          qp.dst_buffer.subspan(wr_id, 1);  // use wr_id as index to the buffer.
+      wqe = verbs_util::CreateReadWr(wr_id, &sge, /*num_sge=*/1,
                                       dst_buffer.data(), setup.dst_mr->rkey);
       break;
     }

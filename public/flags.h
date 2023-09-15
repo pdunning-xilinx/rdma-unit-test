@@ -25,5 +25,9 @@
 ABSL_DECLARE_FLAG(bool, ipv4_only);
 ABSL_DECLARE_FLAG(std::string, device_name);
 ABSL_DECLARE_FLAG(uint64_t, completion_wait_multiplier);
+ABSL_DECLARE_FLAG(bool, peer_server);
+ABSL_DECLARE_FLAG(bool, peer_client);
+ABSL_DECLARE_FLAG(uint16_t, peer_port);
+ABSL_DECLARE_FLAG(std::string, server_ip);
 
 #endif  // THIRD_PARTY_RDMA_UNIT_TEST_PUBLIC_FLAGS_H_

@@ -169,6 +169,15 @@ void PostRecv(ibv_qp* qp, const ibv_recv_wr& wr);
 // Posts a WR to shared receive queue.
 void PostSrqRecv(ibv_srq* srq, const ibv_recv_wr& wr);
 
+// Wrapper function to determine is Client or not, based on cmdline parameter
+bool is_client();
+
+// Wrapper function to determine is Server or not, based on cmdline parameter
+bool is_server();
+
+// States if the test case will be execute in Peer To Peer or Loopback mode.
+bool peer_mode();
+
 // Polls for and returns a completion.
 absl::StatusOr<ibv_wc> WaitForCompletion(
     ibv_cq* cq, absl::Duration timeout = kDefaultCompletionTimeout);

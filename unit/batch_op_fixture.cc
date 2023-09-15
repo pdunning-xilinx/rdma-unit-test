@@ -82,6 +82,10 @@ int BatchOpFixture::QueueRecv(BasicSetup& setup, QpPair& qp) {
   return ibv_post_recv(qp.recv_qp, &wqe, &bad_wr);
 }
 
+int BatchOpFixture::QueueSendImm(BasicSetup& setup, QpPair& qp) {
+  return QueueWork(setup, qp, WorkType::kSendWithImm);
+}
+
 int BatchOpFixture::QueueWork(BasicSetup& setup, QpPair& qp,
                               WorkType work_type) {
   uint64_t wr_id = qp.next_send_wr_id++;
@@ -93,6 +97,10 @@ int BatchOpFixture::QueueWork(BasicSetup& setup, QpPair& qp,
   switch (work_type) {
     case WorkType::kSend: {
       wqe = verbs_util::CreateSendWr(wr_id, &sge, /*num_sge=*/1);
+      break;
+    }
+    case WorkType::kSendWithImm: {
+      wqe = verbs_util::CreateSendWithImmWr(wr_id, &sge, /*num_sge=*/1);
       break;
     }
     case WorkType::kWrite: {

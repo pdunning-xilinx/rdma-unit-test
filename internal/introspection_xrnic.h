@@ -139,6 +139,9 @@ class IntrospectionXRnic : public NicIntrospection {
          ""}, /* Timeout while waiting for a completion */
         {{"LoopbackRcQpTest", "BadSendAddr"},
          ""}, /* Timeout while waiting for a completion */
+
+        /* RNR is not supported */
+        {{"RnrRecoverTest", "RnrRecoverTests"}, ""},
     };
     return deviations;
   }

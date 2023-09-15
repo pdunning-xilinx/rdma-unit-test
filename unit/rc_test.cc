@@ -61,6 +61,7 @@ class LoopbackRcQpTest : public LoopbackFixture {
   static constexpr char kRemoteBufferContent = 'b';
   static constexpr int kLargePayloadPages = 128;
   static constexpr int kPages = 1;
+  enum class RnrOperations { Send, SendWithImm, SendInline, WriteWithImm };
 
   void SetUp() override {
     LoopbackFixture::SetUp();
@@ -2811,6 +2812,133 @@ TEST_F(LoopbackRcQpTest, FlushErrorPollTogether) {
   EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
   EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_RTS);
 }
+
+class RnrRecoverTest
+    : public LoopbackRcQpTest,
+      public testing::WithParamInterface<LoopbackRcQpTest::RnrOperations> {};
+
+TEST_P(RnrRecoverTest, RnrRecoverTests) {
+  LoopbackRcQpTest::RnrOperations operation = GetParam();
+
+  uint32_t valid_inline_size, invalid_inline_size;
+  ASSERT_OK_AND_ASSIGN(std::tie(valid_inline_size, invalid_inline_size),
+                       DetermineInlineLimits());
+
+  // 7 is the magic number for infinite retries.
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(
+      std::tie(local, remote),CreateConnectedClientsPair(
+          kPages,QpInitAttribute().set_max_inline_data(valid_inline_size),
+          QpAttribute().set_rnr_retry(7)));
+
+  const uint32_t kImm = 0xBADDCAFE;
+
+  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+
+  if (operation == RnrOperations::SendInline) {
+    // a vector which is not registered to pd or mr
+    auto data_src = std::make_unique<std::vector<uint8_t>>(valid_inline_size);
+    std::fill(data_src->begin(), data_src->end(), 'c');
+
+    // Modify lsge to send Inline data with addr of the vector
+    lsge.addr = reinterpret_cast<uint64_t>(data_src->data());
+    lsge.length = valid_inline_size;
+    lsge.lkey = 0xDEADBEEF;  // random bad keys
+  }
+
+  ibv_send_wr lwqe =
+      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+  ibv_recv_wr rwqe =
+      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+
+  switch (operation) {
+    case RnrOperations::WriteWithImm:
+      lwqe = verbs_util::CreateWriteWr(/*wr_id=*/1, &lsge, /*num_sge=*/1,
+                                       remote.buffer.data(),remote.mr->rkey);
+      lwqe.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+      lwqe.imm_data = kImm;
+
+      rwqe = verbs_util::CreateRecvWr(/*wr_id=*/0, nullptr, /*num_sge=*/0);
+      break;
+
+    case RnrOperations::SendInline:
+      lwqe.send_flags |= IBV_SEND_INLINE;
+      break;
+
+    case RnrOperations::SendWithImm:
+      lwqe.opcode = IBV_WR_SEND_WITH_IMM;
+      lwqe.imm_data = kImm;
+      break;
+  }
+
+  verbs_util::PostSend(local.qp, lwqe);
+
+  uint32_t i = 0;
+  uint32_t cq_polling_tries = 5;
+
+  while (1) {
+    if (i++ == cq_polling_tries) {
+      verbs_util::PostRecv(remote.qp, rwqe);
+      VLOG(1) << "Posted Recv WR";
+    }
+
+    absl::StatusOr<ibv_wc> lcompletion  =
+        verbs_util::WaitForCompletion(local.cq);
+    absl::StatusOr<ibv_wc> rcompletion  =
+        verbs_util::WaitForCompletion(remote.cq);
+
+    if (lcompletion.ok() || rcompletion.ok()) {
+
+      VLOG(1) << absl::StrCat("Polled CQ try ", i, " - Completion Received.");
+
+      EXPECT_EQ(lcompletion->status, IBV_WC_SUCCESS);
+      EXPECT_EQ(rcompletion->status, IBV_WC_SUCCESS);
+
+      EXPECT_EQ(lcompletion->wr_id, 1);
+      EXPECT_EQ(rcompletion->wr_id, 0);
+
+      EXPECT_EQ(lcompletion->qp_num, local.qp->qp_num);
+      EXPECT_EQ(rcompletion->qp_num, remote.qp->qp_num);
+
+      if (operation == RnrOperations::SendWithImm ||
+          operation == RnrOperations::WriteWithImm) {
+        EXPECT_NE(rcompletion->wc_flags & IBV_WC_WITH_IMM, 0);
+        EXPECT_EQ(kImm, rcompletion->imm_data);
+      }
+
+      break;
+    }
+    else {
+      VLOG(1) << absl::StrCat("Polled CQ try ", i, " - ")
+              << lcompletion.status();
+    }
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    RnrRecoverTest, RnrRecoverTest,
+    testing::Values(LoopbackRcQpTest::RnrOperations::Send,
+                    LoopbackRcQpTest::RnrOperations::SendWithImm,
+                    LoopbackRcQpTest::RnrOperations::SendInline,
+                    LoopbackRcQpTest::RnrOperations::WriteWithImm),
+    [](const testing::TestParamInfo<RnrRecoverTest::ParamType>& info) {
+    std::string name = [info]() {
+      switch (info.param) {
+        case LoopbackRcQpTest::RnrOperations::Send:
+          return "Send";
+        case LoopbackRcQpTest::RnrOperations::SendInline:
+          return "SendInline";
+        case LoopbackRcQpTest::RnrOperations::SendWithImm:
+          return "SendWithImm";
+        case LoopbackRcQpTest::RnrOperations::WriteWithImm:
+          return "WriteWithImm";
+        default:
+          return "Unknown";
+      }
+    }();
+      return name;
+    });
 
 }  // namespace
 }  // namespace rdma_unit_test

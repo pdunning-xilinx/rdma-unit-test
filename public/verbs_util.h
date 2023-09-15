@@ -61,6 +61,15 @@ struct conn_attr {
   union ibv_gid gid;
 };
 
+#define RESET_TO_INIT_MASK (IBV_QP_STATE | IBV_QP_PKEY_INDEX |\
+			    IBV_QP_PORT | IBV_QP_ACCESS_FLAGS)
+#define INIT_TO_RTR_MASK (IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU |\
+			  IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |\
+			  IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER)
+#define RTR_TO_RTS_MASK (IBV_QP_STATE | IBV_QP_TIMEOUT |\
+			 IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |\
+			 IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC)
+
 //////////////////////////////////////////////////////////////////////////////
 //                          Helper Functions
 //////////////////////////////////////////////////////////////////////////////
@@ -186,10 +195,12 @@ bool is_server();
 bool peer_mode();
 
 // Create TCP Server socket to exchange QP information
-void ServerSocket(struct ibv_qp *qp, const struct conn_attr *local_host);
+int RunServer(struct ibv_qp *qp, const struct conn_attr *local_host,
+	      uint8_t port, int sgid_index);
 
 // Create TCP Client socket to exchange QP information
-void ClientSocket(struct ibv_qp *qp, const struct conn_attr *local_host);
+int RunClient(struct ibv_qp *qp, const struct conn_attr *local_host,
+	      uint8_t port, int sgid_index);
 
 // Polls for and returns a completion.
 absl::StatusOr<ibv_wc> WaitForCompletion(

@@ -53,6 +53,13 @@ constexpr absl::Duration kDefaultErrorCompletionTimeout = absl::Seconds(2);
 constexpr std::string_view kIpV4LoopbackAddress{"127.0.0.1"};
 // Definition for IPv6 Loopback Address.
 constexpr std::string_view kIpV6LoopbackAddress{"::1"};
+// Stores the QP attribute information to establish a Peer To Peer Connection
+struct conn_attr {
+  uint16_t lid;
+  uint32_t qpn;
+  uint32_t psn;
+  union ibv_gid gid;
+};
 
 //////////////////////////////////////////////////////////////////////////////
 //                          Helper Functions
@@ -177,6 +184,12 @@ bool is_server();
 
 // States if the test case will be execute in Peer To Peer or Loopback mode.
 bool peer_mode();
+
+// Create TCP Server socket to exchange QP information
+void ServerSocket(struct ibv_qp *qp, const struct conn_attr *local_host);
+
+// Create TCP Client socket to exchange QP information
+void ClientSocket(struct ibv_qp *qp, const struct conn_attr *local_host);
 
 // Polls for and returns a completion.
 absl::StatusOr<ibv_wc> WaitForCompletion(

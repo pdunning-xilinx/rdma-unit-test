@@ -73,6 +73,7 @@ class LoopbackRcQpTest : public LoopbackFixture {
   absl::StatusOr<std::pair<Client, Client>> CreateConnectedClientsPair(
       int pages = kPages, QpInitAttribute qp_init_attr = QpInitAttribute(),
       QpAttribute qp_attr = QpAttribute()) {
+    struct verbs_util::conn_attr local_host;
     ASSIGN_OR_RETURN(Client local,
                      CreateClient(IBV_QPT_RC, pages, qp_init_attr));
     std::fill_n(local.buffer.data(), local.buffer.size(), kLocalBufferContent);
@@ -80,12 +81,31 @@ class LoopbackRcQpTest : public LoopbackFixture {
                      CreateClient(IBV_QPT_RC, pages, qp_init_attr));
     std::fill_n(remote.buffer.data(), remote.buffer.size(),
                 kRemoteBufferContent);
-    RETURN_IF_ERROR(ibv_.ModifyRcQpResetToRts(local.qp, local.port_attr,
-                                              remote.port_attr.gid,
-                                              remote.qp->qp_num, qp_attr));
-    RETURN_IF_ERROR(ibv_.ModifyRcQpResetToRts(remote.qp, remote.port_attr,
-                                              local.port_attr.gid,
-                                              local.qp->qp_num, qp_attr));
+
+    // Execute Tests in Loopback mode
+    if (!verbs_util::peer_mode()) {
+      RETURN_IF_ERROR(ibv_.ModifyRcQpResetToRts(local.qp, local.port_attr,
+                                                remote.port_attr.gid,
+                                                remote.qp->qp_num, qp_attr));
+      RETURN_IF_ERROR(ibv_.ModifyRcQpResetToRts(remote.qp, remote.port_attr,
+                                                local.port_attr.gid,
+                                                local.qp->qp_num, qp_attr));
+      return std::make_pair(local, remote);
+    }
+
+    // Execute Tests in Peer To Peer mode
+    local_host.psn = lrand48() & 0xffffff;
+    if (verbs_util::is_client()) {
+      local_host.gid = local.port_attr.gid;
+      local_host.lid = local.port_attr.attr.lid;
+      local_host.qpn = local.qp->qp_num;
+      verbs_util::ClientSocket(local.qp, &local_host);
+    } else {
+      local_host.gid = remote.port_attr.gid;
+      local_host.lid = remote.port_attr.attr.lid;
+      local_host.qpn = remote.qp->qp_num;
+      verbs_util::ServerSocket(remote.qp, &local_host);
+    }
     return std::make_pair(local, remote);
   }
 

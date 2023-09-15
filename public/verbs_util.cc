@@ -345,6 +345,18 @@ bool is_server() { return absl::GetFlag(FLAGS_peer_server) ? true : false; }
 
 bool peer_mode() { return (is_client() || is_server()) ? true : false; }
 
+void ServerSocket(struct ibv_qp* qp, const struct conn_attr* local_host) {
+  /* TODO: Create a Server socket and exchange the QP information with Client
+   * This will be done in XRDRIV-1132[3/4]
+   */
+}
+
+void ClientSocket(struct ibv_qp* qp, const struct conn_attr* local_host) {
+  /* TODO: Create a Client socket and exchange the QP information with Server
+   * This will be done in XRDRIV-1132[3/4]
+   */
+}
+
 absl::Duration GetSlowDownTimeout(absl::Duration timeout, uint64_t multiplier) {
   if (!multiplier) {
     LOG(ERROR) << "completion_wait_multiplier should be a positive value";

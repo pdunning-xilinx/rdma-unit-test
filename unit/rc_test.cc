@@ -140,29 +140,38 @@ TEST_F(LoopbackRcQpTest, Send) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
 
-  ibv_sge sge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  ibv_recv_wr recv = verbs_util::CreateRecvWr(/*wr_id=*/0, &sge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_sge sge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &sge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    verbs_util::PostSend(local.qp, send);
+  }
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  verbs_util::PostSend(local.qp, send);
-
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RECV);
-  EXPECT_EQ(completion.byte_len, local.buffer.size());
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
-  EXPECT_EQ(completion.wc_flags, 0);
-  EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RECV);
+    EXPECT_EQ(completion.byte_len, local.buffer.size());
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    EXPECT_EQ(completion.wc_flags, 0);
+    EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+  }
 }
 
 TEST_F(LoopbackRcQpTest, SendEmptySgl) {
@@ -172,54 +181,70 @@ TEST_F(LoopbackRcQpTest, SendEmptySgl) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
 
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, nullptr, /*num_sge=*/0);
-  verbs_util::PostRecv(remote.qp, recv);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, nullptr, /*num_sge=*/0);
-  verbs_util::PostSend(local.qp, send);
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, nullptr, /*num_sge=*/0);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, nullptr, /*num_sge=*/0);
+    verbs_util::PostSend(local.qp, send);
+  }
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RECV);
-  EXPECT_EQ(completion.byte_len, 0);
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
-  EXPECT_EQ(completion.wc_flags, 0);
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RECV);
+    EXPECT_EQ(completion.byte_len, 0);
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    EXPECT_EQ(completion.wc_flags, 0);
+  }
 }
 
 TEST_F(LoopbackRcQpTest, UnsignaledSend) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
 
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    send.send_flags = send.send_flags & ~IBV_SEND_SIGNALED;
+    verbs_util::PostSend(local.qp, send);
+  }
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  send.send_flags = send.send_flags & ~IBV_SEND_SIGNALED;
-  verbs_util::PostSend(local.qp, send);
-
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RECV);
-  EXPECT_EQ(completion.byte_len, local.buffer.size());
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
-  EXPECT_EQ(completion.wc_flags, 0);
-  EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
-
-  EXPECT_EQ(ibv_poll_cq(local.cq, 1, &completion), 0);
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RECV);
+    EXPECT_EQ(completion.byte_len, local.buffer.size());
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    EXPECT_EQ(completion.wc_flags, 0);
+    EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_wc completion;
+    EXPECT_EQ(ibv_poll_cq(local.cq, 1, &completion), 0);
+  }
 }
 
 // Send a 64MB chunk from local to remote
@@ -394,34 +419,42 @@ TEST_F(LoopbackRcQpTest, SendImmData) {
   const uint32_t kImm = 0xBADDCAFE;
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    send.opcode = IBV_WR_SEND_WITH_IMM;
+    send.imm_data = kImm;
+    verbs_util::PostSend(local.qp, send);
+  }
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  send.opcode = IBV_WR_SEND_WITH_IMM;
-  send.imm_data = kImm;
-  verbs_util::PostSend(local.qp, send);
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RECV);
+    EXPECT_EQ(completion.byte_len, remote.buffer.size());
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    EXPECT_NE(completion.wc_flags & IBV_WC_WITH_IMM, 0);
+    EXPECT_EQ(kImm, completion.imm_data);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RECV);
-  EXPECT_EQ(completion.byte_len, remote.buffer.size());
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
-  EXPECT_NE(completion.wc_flags & IBV_WC_WITH_IMM, 0);
-  EXPECT_EQ(kImm, completion.imm_data);
-
-  EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+    EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+  }
 }
 
 TEST_F(LoopbackRcQpTest, SendWithInvalidate) {

@@ -146,6 +146,11 @@ const NicIntrospection& Introspection() {
       LOG(FATAL) << device_name  // Crash ok
                  << " does not support ipv6.  Use --ipv4_only";
     }
+
+    // Its mandatory for Cleint instance to specify the Server IP
+    if (absl::GetFlag(FLAGS_peer_client) && absl::GetFlag(FLAGS_server_ip) == "") {
+      LOG(FATAL) << "Please specify the Server IP for this Client instance";
+    }
     return device_info;
   }();
   return *introspection;

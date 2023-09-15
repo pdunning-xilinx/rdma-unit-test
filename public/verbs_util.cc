@@ -339,6 +339,18 @@ void PostSrqRecv(ibv_srq* srq, const ibv_recv_wr& wr) {
   ASSERT_EQ(0, result);
 }
 
+bool is_client() {
+  return absl::GetFlag(FLAGS_peer_client) ? true : false;
+}
+
+bool is_server() {
+  return absl::GetFlag(FLAGS_peer_server) ? true : false;
+}
+
+bool peer_mode() {
+  return (is_client() || is_server()) ? true : false;
+}
+
 absl::Duration GetSlowDownTimeout(absl::Duration timeout, uint64_t multiplier) {
   if (!multiplier) {
     LOG(ERROR) << "completion_wait_multiplier should be a positive value";

@@ -230,6 +230,18 @@ ibv_send_wr CreateSendWithInvalidateWr(uint64_t wr_id, uint32_t rkey) {
   return inv;
 }
 
+ibv_send_wr CreateSendWithImmWr(uint64_t wr_id, ibv_sge* sge, int num_sge) {
+  ibv_send_wr send;
+  send.wr_id = wr_id;
+  send.next = nullptr;
+  send.sg_list = sge;
+  send.num_sge = num_sge;
+  send.opcode = IBV_WR_SEND_WITH_IMM;
+  send.send_flags = IBV_SEND_SIGNALED;
+  send.imm_data = 0xBADDCAFE;
+  return send;
+}
+
 ibv_recv_wr CreateRecvWr(uint64_t wr_id, ibv_sge* sge, int num_sge) {
   ibv_recv_wr recv;
   recv.wr_id = wr_id;

@@ -133,6 +133,12 @@ class IntrospectionXRnic : public NicIntrospection {
          ""}, /* Timeout while waiting for a completion */
         {{"LoopbackRcQpTest", "BadReadAddrRemote"},
          ""}, /* Timeout while waiting for a completion */
+
+        /* XRDRIV-1139 Model does not support error reporting */
+        {{"LoopbackRcQpTest", "SendBufferExceedMr"},
+         ""}, /* Timeout while waiting for a completion */
+        {{"LoopbackRcQpTest", "BadSendAddr"},
+         ""}, /* Timeout while waiting for a completion */
     };
     return deviations;
   }

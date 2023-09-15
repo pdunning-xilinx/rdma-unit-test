@@ -74,6 +74,8 @@ class LoopbackRcQpTest : public LoopbackFixture {
       int pages = kPages, QpInitAttribute qp_init_attr = QpInitAttribute(),
       QpAttribute qp_attr = QpAttribute()) {
     struct verbs_util::conn_attr local_host;
+    int rc;
+
     ASSIGN_OR_RETURN(Client local,
                      CreateClient(IBV_QPT_RC, pages, qp_init_attr));
     std::fill_n(local.buffer.data(), local.buffer.size(), kLocalBufferContent);
@@ -99,13 +101,16 @@ class LoopbackRcQpTest : public LoopbackFixture {
       local_host.gid = local.port_attr.gid;
       local_host.lid = local.port_attr.attr.lid;
       local_host.qpn = local.qp->qp_num;
-      verbs_util::ClientSocket(local.qp, &local_host);
+      rc = verbs_util::RunClient(local.qp, &local_host, local.port_attr.port,
+                                 local.port_attr.gid_index);
     } else {
       local_host.gid = remote.port_attr.gid;
       local_host.lid = remote.port_attr.attr.lid;
       local_host.qpn = remote.qp->qp_num;
-      verbs_util::ServerSocket(remote.qp, &local_host);
+      rc = verbs_util::RunServer(remote.qp, &local_host, remote.port_attr.port,
+                                 remote.port_attr.gid_index);
     }
+    if (rc) LOG(FATAL) << "Failed to connect Peer node, Err:" << rc;
     return std::make_pair(local, remote);
   }
 

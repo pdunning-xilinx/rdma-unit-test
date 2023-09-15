@@ -140,6 +140,8 @@ class DeviceLimitTest : public DeviceTest {
   // deviating from the indicated limit in ibv_device_attr. This constant
   // specifies the tolerable limits.
   static constexpr int kErrorMax = 200;
+  //Bytes of memory to be allocated
+  uint64_t big_mr_size = 0x400000;
 };
 
 TEST_F(DeviceLimitTest, MaxAh) {
@@ -277,6 +279,28 @@ TEST_F(DeviceLimitTest, MaxSrq) {
   EXPECT_LE(std::abs(max_srq - actual_max), kErrorMax);
 }
 
+TEST_F(DeviceLimitTest, BigMrSize) {
+  ASSERT_OK_AND_ASSIGN(ibv_context * context, ibv_.OpenDevice());
+  ibv_pd* pd = ibv_.AllocPd(context);
+  ASSERT_THAT(pd, NotNull());
+  RdmaMemBlock buffer = ibv_.AllocAlignedBufferByBytes(big_mr_size);
+  ibv_mr* mr = ibv_.RegMr(pd, buffer);
+  ASSERT_THAT(mr, NotNull());
+}
+
+TEST_F(DeviceLimitTest, MultiMrVaryMrSize) {
+  ASSERT_OK_AND_ASSIGN(ibv_context * context, ibv_.OpenDevice());
+  ibv_pd* pd = ibv_.AllocPd(context);
+  ASSERT_THAT(pd, NotNull());
+  uint32_t multi_mr = 10;
+  uint32_t i;
+  for (i = 1; i <= multi_mr; ++i) {
+    ASSERT_LE((i * kPageSize), big_mr_size);
+    RdmaMemBlock buffer = ibv_.AllocBuffer(/*page_size*/i);
+    ibv_mr* mr = ibv_.RegMr(pd, buffer);
+    ASSERT_THAT(mr, NotNull());
+  }
+}
 // TODO(author1): Create Max
 
 }  // namespace rdma_unit_test

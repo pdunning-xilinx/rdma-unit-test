@@ -1206,6 +1206,53 @@ TEST_F(LoopbackRcQpTest, ReadInvalidRKeyAndInvalidLKey) {
   EXPECT_THAT(local.buffer.span(), Each(kLocalBufferContent));
 }
 
+TEST_F(LoopbackRcQpTest, BadReadAddrLocal) {
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
+
+  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+  --sge.addr;
+
+  ibv_send_wr read = verbs_util::CreateReadWr(
+      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
+  verbs_util::PostSend(local.qp, read);
+
+  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                       verbs_util::WaitForCompletion(local.cq));
+  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+  EXPECT_EQ(completion.wr_id, 1);
+
+  EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+
+  /* Ensure local QP has moved to error state */
+  EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+  EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_RTS);
+}
+
+TEST_F(LoopbackRcQpTest, BadReadAddrRemote) {
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
+
+  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+  ibv_send_wr read = verbs_util::CreateReadWr(
+      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data() - 32,
+      remote.mr->rkey);
+  verbs_util::PostSend(local.qp, read);
+
+  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                       verbs_util::WaitForCompletion(local.cq));
+  EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
+  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+  EXPECT_EQ(completion.wr_id, 1);
+
+  EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+
+  /* Ensure both QPs have moved to error state */
+  EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+  EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
+}
+
 TEST_F(LoopbackRcQpTest, BasicWrite) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());

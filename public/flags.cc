@@ -36,3 +36,16 @@ ABSL_FLAG(uint32_t, port_num, 0,
 ABSL_FLAG(int, gid_index, -1,
           "The GID index used for connection establishment. Ignore ipv4_only "
           "when assigned. Default: -1 (first available GID)");
+ABSL_FLAG(bool, peer_server, false,
+          "Identifies server side of the peer mode operation");
+ABSL_FLAG(bool, peer_client, false,
+          "Identifies client side of the peer mode operation."
+          "Server instance must be started before Client.");
+ABSL_FLAG(uint16_t, peer_port, 4455,
+          "Use with --peer_server or --peer_client to specify the port number."
+          "This uniquely identify a connection endpoint. If --peer_port is not"
+          "specified then default port number 4455 will be used.");
+ABSL_FLAG(std::string, server_ip, "",
+          "Use with --peer_client to specify server IP address."
+          "Parameter value should match the IP address where server"
+          "instance of this peer is running.");

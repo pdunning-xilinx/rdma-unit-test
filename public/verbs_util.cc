@@ -351,16 +351,256 @@ bool peer_mode() {
   return (is_client() || is_server()) ? true : false;
 }
 
-void ServerSocket(struct ibv_qp *qp, const struct conn_attr *local_host) {
-  /* TODO: Create a Server socket and exchange the QP information with Client
-   * This will be done in XRDRIV-1132[3/4]
-   */
+static int connect_peer(struct ibv_qp *qp, int local_psn,
+			struct conn_attr *remote_host, uint8_t port,
+			int sgid_index)
+{
+  // Attributes for bringing QP from RESET to INIT state.
+  const unsigned int qp_access_flags = IBV_ACCESS_REMOTE_WRITE |
+				       IBV_ACCESS_REMOTE_READ |
+				       IBV_ACCESS_REMOTE_ATOMIC;
+  const uint16_t pkey_index = 0;
+
+  // Attributes for bringing QP from INIT to RTR state.
+  const uint8_t min_rnr_timer = 26; // 81.92 milliseconds
+
+  // Attributes for bringing QP from RTR to RTS state.
+  const uint8_t timeout = 0; // infinite timeout
+  const uint8_t retry_cnt = 5;
+  const uint8_t rnr_retry = 5;
+  const uint8_t max_rd_atomic = 10;
+  const uint8_t sl = 5;
+  const uint8_t hop_limit = 127;
+  int rc;
+
+  // Initialize QP state
+  struct ibv_qp_attr attr = {
+    .qp_state        = IBV_QPS_INIT,
+    .qp_access_flags = qp_access_flags,
+    .pkey_index      = pkey_index,
+    .port_num        = port
+  };
+
+  rc = ibv_modify_qp(qp, &attr, RESET_TO_INIT_MASK);
+  if (rc) {
+    LOG(ERROR) << "Failed to modify QP to INIT, rc:" << rc;
+    return rc;
+  }
+
+  // Change QP state to Ready To Receive state
+  attr.qp_state               = IBV_QPS_RTR;
+  attr.path_mtu               = IBV_MTU_1024;
+  attr.rq_psn                 = remote_host->psn;
+  attr.dest_qp_num            = remote_host->qpn;
+  attr.ah_attr.dlid           = remote_host->lid;
+  attr.ah_attr.sl             = sl;
+  attr.ah_attr.src_path_bits  = 0;
+  attr.ah_attr.is_global      = 0;
+  attr.ah_attr.port_num       = port;
+  attr.max_dest_rd_atomic     = max_rd_atomic;
+  attr.min_rnr_timer          = min_rnr_timer;
+
+  if (remote_host->gid.global.interface_id) {
+    attr.ah_attr.is_global = 1;
+    attr.ah_attr.grh.hop_limit = hop_limit;
+    attr.ah_attr.grh.dgid = remote_host->gid;
+    attr.ah_attr.grh.sgid_index = sgid_index;
+  }
+
+  rc  = ibv_modify_qp(qp, &attr, INIT_TO_RTR_MASK);
+  if (rc) {
+    LOG(ERROR) << "Failed to modify QP to RTR, rc:" << rc;
+    return rc;
+  }
+
+  // Change QP state to Ready To Send state
+  attr.qp_state       = IBV_QPS_RTS;
+  attr.timeout        = timeout;
+  attr.retry_cnt      = retry_cnt;
+  attr.rnr_retry      = rnr_retry;
+  attr.sq_psn         = local_psn;
+  attr.max_rd_atomic  = max_rd_atomic;
+  rc = ibv_modify_qp(qp, &attr, RTR_TO_RTS_MASK);
+  if (rc)
+    LOG(ERROR) << "Failed to modify QP to RTS, rc:" << rc;
+  return rc;
 }
 
-void ClientSocket(struct ibv_qp *qp, const struct conn_attr *local_host) {
-  /* TODO: Create a Client socket and exchange the QP information with Server
-   * This will be done in XRDRIV-1132[3/4]
-   */
+// Convert the received gid to the CPUs native byte order
+static void wire_gid_to_gid(const char *wgid, union ibv_gid *gid)
+{
+  uint32_t tmp_gid[4];
+  char tmp[9];
+  __be32 v32;
+  int i;
+
+  for (tmp[8] = 0, i = 0; i < 4; ++i) {
+    memcpy(tmp, wgid + i * 8, 8);
+    sscanf(tmp, "%x", &v32);
+    tmp_gid[i] = be32toh(v32);
+  }
+  memcpy(gid, tmp_gid, sizeof(*gid));
+}
+
+// Convert the local gid to big endian byte order
+static void gid_to_wire_gid(const union ibv_gid *gid, char wgid[])
+{
+  uint32_t tmp_gid[4];
+  int i;
+
+  memcpy(tmp_gid, gid, sizeof(tmp_gid));
+  for (i = 0; i < 4; ++i)
+    sprintf(&wgid[i * 8], "%08x", htobe32(tmp_gid[i]));
+}
+
+int RunServer(struct ibv_qp *qp, const struct conn_attr *local_host,
+	      uint8_t port, int sgid_index) {
+  // Message to share the connection attributes with Client
+  char msg[sizeof "0000:000000:000000:00000000000000000000000000000000"];
+  struct conn_attr remote_host;
+  struct sockaddr_in address;
+  int addrlen = sizeof(address);
+  int backlog = 0;
+  int new_socket;
+  int server_fd;
+  char gid[33];
+  int opt = 1;
+  int rc;
+
+  // Creating socket file descriptor
+  server_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (server_fd == -1)
+    LOG(FATAL) << "Server: Socket creation failed";
+
+  if (setsockopt(server_fd, SOL_SOCKET,
+                 SO_REUSEADDR | SO_REUSEPORT,
+                 &opt, sizeof(opt)))
+    LOG(FATAL) << "Server: Setsockopt Failed";
+
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = INADDR_ANY;
+  address.sin_port = htons(absl::GetFlag(FLAGS_peer_port));
+
+  if (bind(server_fd, (struct sockaddr*)&address, sizeof(address)) < 0) {
+    shutdown(server_fd, SHUT_RDWR);
+    LOG(FATAL) << "Server: Bind failed";
+  }
+
+  if (listen(server_fd, backlog) < 0) {
+    shutdown(server_fd, SHUT_RDWR);
+    LOG(FATAL) << "Server: Listen failed";
+  }
+
+  if ((new_socket = accept(server_fd, (struct sockaddr*)&address,
+                           (socklen_t*)&addrlen)) < 0) {
+    shutdown(server_fd, SHUT_RDWR);
+    LOG(FATAL) << "Server: Accept failed";
+  }
+
+  if ((rc = read(new_socket, msg, sizeof msg)) != sizeof msg) {
+    LOG(ERROR) << "Server: Couldn't read remote address";
+    if (rc == -1)
+      rc = errno;
+    else
+      rc = -EMSGSIZE;
+    goto out;
+  }
+
+  sscanf(msg, "%hu:%x:%x:%s", &remote_host.lid, &remote_host.qpn,
+			      &remote_host.psn, gid);
+  wire_gid_to_gid(gid, &remote_host.gid);
+
+  gid_to_wire_gid(&local_host->gid, gid);
+  sprintf(msg, "%04x:%06x:%06x:%s", local_host->lid, local_host->qpn,
+          local_host->psn, gid);
+
+  if ((rc = write(new_socket, msg, sizeof msg)) != sizeof msg) {
+    LOG(ERROR) << "Server: Couldn't send/recv local address";
+    if (rc == -1)
+      rc = errno;
+    else
+      rc = -EMSGSIZE;
+    goto out;
+  }
+
+  rc = connect_peer(qp, local_host->psn, &remote_host, port, sgid_index);
+  if (rc)
+    LOG(ERROR) << "Couldn't connect to remote QP";
+
+out:
+  // closing the connected socket
+  close(new_socket);
+  // closing the listening socket
+  shutdown(server_fd, SHUT_RDWR);
+  return rc;
+}
+
+int RunClient(struct ibv_qp *qp, const struct conn_attr *local_host,
+	      uint8_t port, int sgid_index) {
+  // Message to share the connection attributes with Server
+  char msg[sizeof "0000:000000:000000:00000000000000000000000000000000"];
+  struct conn_attr remote_host;
+  struct sockaddr_in serv_addr;
+  int client_fd;
+  char gid[33];
+  int rc;
+
+  // Code for Client Connection
+  client_fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (client_fd == -1)
+    LOG(FATAL) << "Client: Socket creation failed";
+
+  serv_addr.sin_family = AF_INET;
+  serv_addr.sin_port = htons(absl::GetFlag(FLAGS_peer_port));
+
+  // Convert IPv4 address from Presentation (string) to Numeric format (binary)
+  if (inet_pton(AF_INET, absl::GetFlag(FLAGS_server_ip).c_str(),
+		&serv_addr.sin_addr) <= 0) {
+    LOG(ERROR) << "Client: Invalid address/ Address not supported";
+    rc = -EINVAL;
+    goto out;
+  }
+
+  rc = connect(client_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
+  if (rc) {
+    LOG(ERROR) << "Client: Connect failed";
+    goto out;
+  }
+
+  gid_to_wire_gid(&local_host->gid, gid);
+  sprintf(msg, "%04x:%06x:%06x:%s", local_host->lid, local_host->qpn,
+          local_host->psn, gid);
+
+  if ((rc = write(client_fd, msg, sizeof msg)) != sizeof msg) {
+    LOG(ERROR) << "Client: Couldn't send local address";
+    if (rc == -1)
+      rc = errno;
+    else
+      rc = -EMSGSIZE;
+    goto out;
+  }
+
+  if ((rc = read(client_fd, msg, sizeof msg)) != sizeof msg) {
+    LOG(ERROR) <<  "Couldn't read/write remote address";
+    if (rc == -1)
+      rc = errno;
+    else
+      rc = -EMSGSIZE;
+    goto out;
+  }
+
+  sscanf(msg, "%hu:%x:%x:%s", &remote_host.lid, &remote_host.qpn,
+			      &remote_host.psn, gid);
+  wire_gid_to_gid(gid, &remote_host.gid);
+
+  rc = connect_peer(qp, local_host->psn, &remote_host, port, sgid_index);
+  if (rc)
+    LOG(ERROR) << "Couldn't connect to remote QP";
+
+out:
+  // closing the connected socket
+  close(client_fd);
+  return rc;
 }
 
 absl::Duration GetSlowDownTimeout(absl::Duration timeout, uint64_t multiplier) {

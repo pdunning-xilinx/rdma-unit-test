@@ -279,6 +279,46 @@ class RdmaAccessTest : public AccessTestFixture,
     EXPECT_EQ(completion.wr_id, wr.wr_id);
     EXPECT_EQ(completion.qp_num, setup.src_qp->qp_num);
   }
+
+  void ExecuteTwoDstBufferTest(int src_mr_access, int dst_remote_access,
+                               int dst_remote_access_2,
+                               ibv_wc_status expected_status_1,
+                               ibv_wc_status expected_status_2) {
+    ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
+    setup.dst_buffer_2 = ibv_.AllocBuffer(/*pages=*/2);
+    RKeyMemmoryType memory_type = std::get<0>(GetParam());
+    ibv_wr_opcode opcode = std::get<1>(GetParam());
+    ibv_mr* src_mr = ibv_.RegMr(setup.pd, setup.src_buffer, src_mr_access);
+    ASSERT_THAT(src_mr, NotNull());
+    ASSERT_OK_AND_ASSIGN(
+        uint32_t rkey,
+        CreateRKeyForBuffer(setup.pd, setup.dst_buffer, setup.dst_qp,
+                            dst_remote_access, memory_type));
+    ASSERT_OK_AND_ASSIGN(
+        uint32_t rkey_2,
+        CreateRKeyForBuffer(setup.pd, setup.dst_buffer_2, setup.dst_qp,
+                            dst_remote_access_2, memory_type));
+    ibv_sge sge = verbs_util::CreateSge(setup.src_buffer.span(), src_mr);
+    ibv_send_wr wr =
+        verbs_util::CreateRdmaWr(opcode, /*wr_id=*/1, &sge, /*num_sge=*/1,
+                                 setup.dst_buffer.data(), rkey);
+    verbs_util::PostSend(setup.src_qp, wr);
+    LOG(INFO) << "Operation done on first buffer, waiting for WC...";
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(setup.src_cq));
+    EXPECT_EQ(completion.status, expected_status_1);
+    EXPECT_EQ(completion.wr_id, wr.wr_id);
+    EXPECT_EQ(completion.qp_num, setup.src_qp->qp_num);
+    wr = verbs_util::CreateRdmaWr(opcode, /*wr_id=*/2, &sge, /*num_sge=*/1,
+                                  setup.dst_buffer_2.data(), rkey_2);
+    verbs_util::PostSend(setup.src_qp, wr);
+    LOG(INFO) << "Operation done on second buffer, waiting for WC...";
+    ASSERT_OK_AND_ASSIGN(completion,
+                         verbs_util::WaitForCompletion(setup.src_cq));
+    EXPECT_EQ(completion.status, expected_status_2);
+    EXPECT_EQ(completion.wr_id, wr.wr_id);
+    EXPECT_EQ(completion.qp_num, setup.src_qp->qp_num);
+  }
 };
 
 TEST_P(RdmaAccessTest, AllAccess) {
@@ -319,6 +359,28 @@ TEST_P(RdmaAccessTest, MissingDstRemoteAtomic) {
       /*src_mr_access=*/kMrAccessAll,
       /*dst_remote_access=*/kRemoteAccessAll & ~IBV_ACCESS_REMOTE_ATOMIC,
       /*expected_status=*/IBV_WC_SUCCESS);
+}
+
+TEST_P(RdmaAccessTest, MinimalAccess) {
+  ibv_wr_opcode opcode = std::get<1>(GetParam());
+  ExecuteTest(opcode == IBV_WR_RDMA_READ ? IBV_ACCESS_LOCAL_WRITE : 0,
+              opcode == IBV_WR_RDMA_READ ? IBV_ACCESS_REMOTE_READ :
+                        IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_LOCAL_WRITE,
+              IBV_WC_SUCCESS);
+}
+
+TEST_P(RdmaAccessTest, TwoDstBufferValidAccess ) {
+  ExecuteTwoDstBufferTest(kMrAccessAll, IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ,
+                          IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ,
+                          IBV_WC_SUCCESS, IBV_WC_SUCCESS);
+}
+
+TEST_P(RdmaAccessTest, TwoDstBufferMixedAccess ) {
+  constexpr static int kRemoteAccessMr1 = IBV_ACCESS_REMOTE_WRITE |
+                                          IBV_ACCESS_REMOTE_READ |
+                                          IBV_ACCESS_LOCAL_WRITE;
+  ExecuteTwoDstBufferTest(kMrAccessAll, kRemoteAccessMr1, IBV_ACCESS_LOCAL_WRITE,
+                          IBV_WC_SUCCESS, IBV_WC_REM_ACCESS_ERR);
 }
 
 INSTANTIATE_TEST_SUITE_P(

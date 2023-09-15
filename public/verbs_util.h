@@ -124,6 +124,9 @@ ibv_send_wr CreateSendWr(uint64_t wr_id, ibv_sge* sge, int num_sge);
 // Creates a WR for send with invalidate.
 ibv_send_wr CreateSendWithInvalidateWr(uint64_t wr_id, uint32_t rkey);
 
+// Creates a WR for send with immediate.
+ibv_send_wr CreateSendWithImmWr(uint64_t wr_id, ibv_sge* sge, int num_sge);
+
 // Creates  a WR for recv.
 ibv_recv_wr CreateRecvWr(uint64_t wr_id, ibv_sge* sge, int num_sge);
 

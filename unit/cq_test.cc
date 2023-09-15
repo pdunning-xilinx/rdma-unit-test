@@ -218,6 +218,28 @@ TEST_P(CqBatchOpTest, SendRecvSharedCq) {
   WaitForAndVerifyCompletions(send_cq, total_completions);
 }
 
+TEST_P(CqBatchOpTest, SendWithImmSharedCq) {
+  ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
+  ibv_cq* send_cq = ibv_.CreateCq(setup.context);
+  ibv_cq* recv_cq = ibv_.CreateCq(setup.context);
+  const int kQueuePairCount = GetParam();
+  const int sends_per_queue_pair = (recv_cq->cqe - 10) / kQueuePairCount;
+  const int total_completions = sends_per_queue_pair * kQueuePairCount;
+  ASSERT_OK_AND_ASSIGN(
+      std::vector<QpPair> qp_pairs,
+      CreateTestQpPairs(setup, send_cq, recv_cq, sends_per_queue_pair,
+                        kQueuePairCount));
+  for (auto& qp_pair : qp_pairs) {
+    for (int i = 0; i < sends_per_queue_pair; ++i) {
+      QueueRecv(setup, qp_pair);
+    }
+  }
+  ThreadedSubmission(qp_pairs, sends_per_queue_pair,
+                     [&setup, this](QpPair& qp) { QueueSendImm(setup, qp); });
+  WaitForAndVerifyCompletions(send_cq, total_completions);
+  WaitForAndVerifyCompletions(recv_cq, total_completions);
+}
+
 TEST_P(CqBatchOpTest, ReadSharedCq) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ibv_cq* cq = ibv_.CreateCq(setup.context);

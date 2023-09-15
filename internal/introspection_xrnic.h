@@ -120,6 +120,10 @@ class IntrospectionXRnic : public NicIntrospection {
       /* Delete MR MCDI timeout */
       {{"MRLoopbackTest", "OutstandingWrite"}, ""},
       {{"MRLoopbackTest", "OutstandingRead"}, ""},
+
+      /* XRDRIV-1198 Model does not support error reporting */
+      {{"LoopbackRcQpTest", "BadWriteAddrLocal"}, ""}, /* Timeout while waiting for a completion */
+      {{"LoopbackRcQpTest", "BadWriteAddrRemote"}, ""}, /* Timeout while waiting for a completion */
     };
     return deviations;
   }

@@ -1569,6 +1569,52 @@ TEST_F(LoopbackRcQpTest, WriteInvalidRKeyAndInvalidLKey) {
   EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
 }
 
+TEST_F(LoopbackRcQpTest, BadWriteAddrLocal) {
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
+
+  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+  --sge.addr;
+  ibv_send_wr write = verbs_util::CreateWriteWr(
+      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
+  verbs_util::PostSend(local.qp, write);
+
+  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                       verbs_util::WaitForCompletion(local.cq));
+  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+  EXPECT_EQ(completion.wr_id, 1);
+
+  EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+
+  /* Ensure local QP has moved to error state */
+  EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+  EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_RTS);
+}
+
+TEST_F(LoopbackRcQpTest, BadWriteAddrRemote) {
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
+
+  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+  ibv_send_wr write = verbs_util::CreateWriteWr(
+      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data() - 32,
+      remote.mr->rkey);
+  verbs_util::PostSend(local.qp, write);
+
+  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                       verbs_util::WaitForCompletion(local.cq));
+  EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
+  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+  EXPECT_EQ(completion.wr_id, 1);
+
+  EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+
+  /* Ensure both QPs have moved to error state */
+  EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+  EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
+}
+
 TEST_F(LoopbackRcQpTest, FetchAddInvalidSize) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
@@ -2417,6 +2463,43 @@ INSTANTIATE_TEST_SUITE_P(
     [](const testing::TestParamInfo<RemoteRcQpStateTest::ParamType>& info) {
       return info.param.name;
     });
+
+TEST_F(LoopbackRcQpTest, WriteBatchedWr) {
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote),
+                       CreateConnectedClientsPair(kLargePayloadPages));
+
+  uint32_t batch_size = verbs_util::GetQpCap(local.qp).max_send_wr;
+  uint32_t sge_size = local.buffer.size() / batch_size;
+
+  // Address in each sge points to buffer of equal size
+  // Offset for each buffer local and remote = wr_id * size, here wr_id = i
+  // Length of each buffer = size
+  // sge[i] is used to create WR write_batch[i]
+  std::vector<ibv_sge> sge(batch_size);
+  std::vector<ibv_send_wr> write_batch(batch_size);
+  for (uint32_t i = 0; i < batch_size; ++i) {
+    sge[i] = verbs_util::CreateSge(local.buffer.subspan(
+        /*offset=*/i*sge_size,/*size=*/sge_size), local.mr);
+    write_batch[i] = verbs_util::CreateWriteWr(
+        /*wr_id=*/i, &sge[i], /*num_sge=*/1, remote.buffer.data() + i*sge_size,
+         remote.mr->rkey);
+    write_batch[i].next = (i != batch_size-1) ? &write_batch[i + 1] : nullptr;
+  }
+
+  verbs_util::PostSend(local.qp, write_batch[0]);
+
+  uint32_t completions = 0;
+  while (completions < batch_size) {
+    absl::StatusOr<ibv_wc> completion  =
+        verbs_util::WaitForCompletion(local.cq);
+    if (completion.ok()) {
+      EXPECT_EQ(completion->status, IBV_WC_SUCCESS);
+      EXPECT_EQ(completion->qp_num, local.qp->qp_num);
+      EXPECT_EQ(completion->wr_id, completions++);
+    }
+  }
+}
 
 TEST_F(LoopbackRcQpTest, FullSubmissionQueue) {
   Client local, remote;

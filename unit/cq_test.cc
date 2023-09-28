@@ -261,6 +261,25 @@ INSTANTIATE_TEST_SUITE_P(
       return absl::StrFormat("%dQps", info.param);
     });
 
+TEST_F(CqBatchOpTest, SendMaxCqeSharedCq) {
+  ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
+  ibv_cq* send_cq = ibv_.CreateCq(setup.context);
+  ibv_cq* recv_cq = ibv_.CreateCq(setup.context);
+  const int sends_per_queue_pair = recv_cq->cqe;
+  const int total_completions = sends_per_queue_pair;
+  ASSERT_OK_AND_ASSIGN(
+      std::vector<QpPair> qp_pairs,
+      CreateTestQpPairs(setup, send_cq, recv_cq, sends_per_queue_pair,
+                        /*QueuePairCount*/ 1));
+  for (int i = 0; i < sends_per_queue_pair; ++i) {
+    QueueRecv(setup, qp_pairs[0]);
+  }
+  ThreadedSubmission(qp_pairs, sends_per_queue_pair,
+                     [&setup, this](QpPair& qp) { QueueSend(setup, qp); });
+  WaitForAndVerifyCompletions(recv_cq, total_completions);
+  WaitForAndVerifyCompletions(send_cq, total_completions);
+}
+
 class CqOverflowTest : public CqBatchOpTest {
  protected:
   // Maximum amount of time for waiting for data to land in destination buffer.

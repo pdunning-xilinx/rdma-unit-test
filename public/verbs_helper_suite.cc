@@ -51,6 +51,24 @@ VerbsHelperSuite::VerbsHelperSuite()
         return std::make_unique<VerbsExtension>();
       }()) {}
 
+absl::Status VerbsHelperSuite::ModifyRcQpResetToRtr(ibv_qp* local_qp,
+                                                    const PortAttribute& local,
+                                                    ibv_gid remote_gid,
+                                                    uint32_t remote_qpn,
+                                                    QpAttribute qp_attr) {
+  int result_code = ModifyRcQpResetToInit(local_qp, local.port, qp_attr);
+  if (result_code) {
+    return absl::InternalError(absl::StrFormat(
+        "Modified QP from RESET to INIT failed (%d).", result_code));
+  }
+  result_code =
+      ModifyRcQpInitToRtr(local_qp, local, remote_gid, remote_qpn, qp_attr);
+  if (result_code) {
+    return absl::InternalError(absl::StrFormat(
+        "Modified QP from INIT to RTR failed (%d).", result_code));
+  }
+  return absl::OkStatus();
+}
 absl::Status VerbsHelperSuite::ModifyRcQpResetToRts(ibv_qp* local_qp,
                                                     const PortAttribute& local,
                                                     ibv_gid remote_gid,
@@ -75,6 +93,23 @@ absl::Status VerbsHelperSuite::ModifyRcQpResetToRts(ibv_qp* local_qp,
   return absl::OkStatus();
 }
 
+absl::Status VerbsHelperSuite::ModifyRcQpResetToSqd(ibv_qp* local_qp,
+                                                    const PortAttribute& local,
+                                                    ibv_gid remote_gid,
+                                                    uint32_t remote_qpn,
+                                                    QpAttribute qp_attr) {
+  absl::Status status = ModifyRcQpResetToRts(local_qp, local, remote_gid,
+		                             remote_qpn, qp_attr);
+  if(!status.ok()) {
+    return status;
+  }
+  int result_code = ModifyRcQpRtsToSqd(local_qp, qp_attr);
+  if (result_code) {
+    return absl::InternalError(absl::StrFormat(
+        "Modified QP from RTS to SQD failed (%d).", result_code));
+  }
+  return absl::OkStatus();
+}
 absl::Status VerbsHelperSuite::ModifyLoopbackRcQpResetToRts(
     ibv_qp* source_qp, ibv_qp* destination_qp, const PortAttribute& port_attr,
     QpAttribute qp_attr) {
@@ -115,6 +150,14 @@ int VerbsHelperSuite::ModifyRcQpRtrToRts(ibv_qp* qp, QpAttribute qp_attr) {
   int mask = qp_attr.GetRcRtrToRtsMask();
   int result_code = ibv_modify_qp(qp, &mod_rts, mask);
   VLOG(1) << absl::StrFormat("Modify QP (%p) from RTR to RTS (%d).", qp,
+                             result_code);
+  return result_code;
+}
+
+int VerbsHelperSuite::ModifyRcQpRtsToSqd(ibv_qp* qp, QpAttribute qp_attr) {
+  ibv_qp_attr mod_sqd = qp_attr.GetRcRtsToSqdAttr();
+  int result_code = ibv_modify_qp(qp, &mod_sqd, IBV_QP_STATE);
+  VLOG(1) << absl::StrFormat("Modify QP (%p) from RTS to SQD (%d).", qp,
                              result_code);
   return result_code;
 }

@@ -217,6 +217,12 @@ int QpAttribute::GetRcRtrToRtsMask() const {
          IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY;
 }
 
+ibv_qp_attr QpAttribute::GetRcRtsToSqdAttr() const {
+  return ibv_qp_attr{.qp_state = IBV_QPS_SQD};
+}
+
+int QpAttribute::GetRcRtsToSqdMask() const { return IBV_QP_STATE; }
+
 ibv_qp_attr QpAttribute::GetUdResetToInitAttr(uint8_t port,
                                               uint32_t qkey) const {
   return ibv_qp_attr{

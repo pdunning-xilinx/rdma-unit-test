@@ -383,6 +383,64 @@ TEST_F(QpTest, ModifyBadRtrToRtsStateTransition) {
   EXPECT_EQ(ibv_modify_qp(qp, &mod_rts, mask_rts), 0);
 }
 
+TEST_F(QpTest, ModifyBadRtsToSqdStateTransition) {
+  ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
+  ibv_qp* qp = ibv_.CreateQp(setup.pd, setup.basic_attr);
+  ASSERT_THAT(qp, NotNull());
+  // Reset -> Init.
+  ASSERT_EQ(InitRcQP(qp), 0);
+  // Init -> RTR
+  ibv_qp_attr mod_rtr = QpAttribute().GetRcInitToRtrAttr(
+      setup.port_attr.port, setup.port_attr.gid_index, setup.port_attr.gid,
+      qp->qp_num);
+  int mask_rtr = QpAttribute().GetRcInitToRtrMask();
+  ASSERT_EQ(ibv_modify_qp(qp, &mod_rtr, mask_rtr), 0);
+  // RTR -> RTS
+  ibv_qp_attr mod_rts = QpAttribute().GetRcRtrToRtsAttr();
+  int mask_rts = QpAttribute().GetRcRtrToRtsMask();
+  ASSERT_EQ(ibv_modify_qp(qp, &mod_rts, mask_rts), 0);
+  // RTS -> SQD with invalid mask
+  ibv_qp_attr mod_sqd = QpAttribute().GetRcRtsToSqdAttr();
+  int mask_sqd = QpAttribute().GetRcRtsToSqdMask();
+  for (auto mask : CreateMaskCombinations(mask_rts)) {
+    if (mask != mask_sqd) {
+      EXPECT_NE(ibv_modify_qp(qp, &mod_sqd, mask), 0);
+    }
+  }
+  // RTS -> SQD with valid mask
+  EXPECT_EQ(ibv_modify_qp(qp, &mod_sqd, mask_sqd), 0);
+}
+
+TEST_F(QpTest, ModifyBadSqdToRtsStateTransition) {
+  ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
+  ibv_qp* qp = ibv_.CreateQp(setup.pd, setup.basic_attr);
+  ASSERT_THAT(qp, NotNull());
+  // Reset -> Init.
+  ASSERT_EQ(InitRcQP(qp), 0);
+  // Init -> RTR
+  ibv_qp_attr mod_rtr = QpAttribute().GetRcInitToRtrAttr(
+      setup.port_attr.port, setup.port_attr.gid_index, setup.port_attr.gid,
+      qp->qp_num);
+  int mask_rtr = QpAttribute().GetRcInitToRtrMask();
+  ASSERT_EQ(ibv_modify_qp(qp, &mod_rtr, mask_rtr), 0);
+  // RTR -> RTS
+  ibv_qp_attr mod_rts = QpAttribute().GetRcRtrToRtsAttr();
+  int mask_rts = QpAttribute().GetRcRtrToRtsMask();
+  ASSERT_EQ(ibv_modify_qp(qp, &mod_rts, mask_rts), 0);
+  // RTS -> SQD
+  ibv_qp_attr mod_sqd = QpAttribute().GetRcRtsToSqdAttr();
+  int mask_sqd = QpAttribute().GetRcRtsToSqdMask();
+  EXPECT_EQ(ibv_modify_qp(qp, &mod_sqd, mask_sqd), 0);
+  // SQD -> RTS with invalid mask
+  for (auto mask : CreateMaskCombinations(mask_rts)) {
+    if (mask != mask_sqd) {
+      EXPECT_NE(ibv_modify_qp(qp, &mod_rts, mask), 0);
+    }
+  }
+  // SQD -> RTS with valid mask
+  EXPECT_EQ(ibv_modify_qp(qp, &mod_rts, mask_sqd), 0);
+}
+
 TEST_F(QpTest, UdModify) {
   if (!Introspection().SupportsUdQp()) {
     GTEST_SKIP();

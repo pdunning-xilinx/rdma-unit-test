@@ -68,8 +68,20 @@ class VerbsHelperSuite {
   VerbsHelperSuite& operator=(const VerbsHelperSuite& helper) = delete;
   virtual ~VerbsHelperSuite() = default;
 
+  // Modify a RC `local_qp` from RESET state to RTR state.
+  absl::Status ModifyRcQpResetToRtr(ibv_qp* local_qp,
+                                    const PortAttribute& local,
+                                    ibv_gid remote_gid, uint32_t remote_qpn,
+                                    QpAttribute qp_attr = QpAttribute());
+
   // Modify a RC `local_qp` from RESET state to RTS state.
   absl::Status ModifyRcQpResetToRts(ibv_qp* local_qp,
+                                    const PortAttribute& local,
+                                    ibv_gid remote_gid, uint32_t remote_qpn,
+                                    QpAttribute qp_attr = QpAttribute());
+
+  // Modify a RC `local_qp` from RESET state to SQD state.
+  absl::Status ModifyRcQpResetToSqd(ibv_qp* local_qp,
                                     const PortAttribute& local,
                                     ibv_gid remote_gid, uint32_t remote_qpn,
                                     QpAttribute qp_attr = QpAttribute());
@@ -87,6 +99,8 @@ class VerbsHelperSuite {
                           QpAttribute qp_attr = QpAttribute());
   // Modify a RC `qp` from RTR to RTS state.
   int ModifyRcQpRtrToRts(ibv_qp* qp, QpAttribute qp_attr = QpAttribute());
+  // Modify a RC `qp` from RTS to SQD state.
+  int ModifyRcQpRtsToSqd(ibv_qp* qp, QpAttribute qp_attr = QpAttribute());
   // Modify two RC QPs `qp_1` and `qp_2` from RESET state to RTS state.
   absl::Status SetUpLoopbackRcQps(ibv_qp* source_qp, ibv_qp* destination_qp,
                                   const PortAttribute& port_attr,

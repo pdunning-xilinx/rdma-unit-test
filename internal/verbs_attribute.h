@@ -101,6 +101,10 @@ class QpAttribute {
   // state to RTS state.
   ibv_qp_attr GetRcRtrToRtsAttr() const;
   int GetRcRtrToRtsMask() const;
+  // Return ibv_qp_attr and corresponding mask for modifying RC QP from RTS
+  // state to SQD state
+  ibv_qp_attr GetRcRtsToSqdAttr() const;
+  int GetRcRtsToSqdMask() const;
 
   // Return ibv_qp_attr and corresponding mask for modifying Ud QP from RESET
   // state to INIT state.

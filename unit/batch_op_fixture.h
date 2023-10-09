@@ -62,18 +62,24 @@ class BatchOpFixture : public RdmaVerbsFixture {
     ibv_mr* dst_mr;
   };
 
-  enum class WorkType : uint8_t { kSend, kWrite, kRead, kSendWithImm };
+  enum class WorkType : uint8_t { kSend, kWrite, kRead, kSendWithImm, kSendUd };
 
   absl::StatusOr<BasicSetup> CreateBasicSetup();
 
   // Posts send WQE.
   int QueueSend(BasicSetup& setup, QpPair& qp);
 
+  // Posts Ud send WQE.
+  int QueueSendUd(BasicSetup& setup, QpPair& qp);
+
   // Posts write WQE.
   int QueueWrite(BasicSetup& setup, QpPair& qp);
 
   // Posts recv WQE.
   int QueueRecv(BasicSetup& setup, QpPair& qp);
+
+  // Posts UD recv WQE.
+  int QueueRecvUd(BasicSetup& setup, QpPair& qp);
 
   // Posts read WQE.
   int QueueRead(BasicSetup& setup, QpPair& qp);
@@ -84,6 +90,13 @@ class BatchOpFixture : public RdmaVerbsFixture {
   // Post a Send or Write WR to a QP. The WR uses a 1-byte buffer at byte 1,
   // then byte 2, and so on.
   int QueueWork(BasicSetup& setup, QpPair& qp, WorkType work_type);
+
+  // Create |count| UD qps.
+  absl::StatusOr<std::vector<QpPair>> CreateUdTestQpPairs(BasicSetup& setup,
+                                                          ibv_cq* send_cq,
+                                                          ibv_cq* recv_cq,
+                                                          size_t max_qp_wr,
+                                                          int count);
 
   // Create |count| qps.
   absl::StatusOr<std::vector<QpPair>> CreateTestQpPairs(BasicSetup& setup,

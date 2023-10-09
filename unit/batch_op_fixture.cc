@@ -63,6 +63,10 @@ int BatchOpFixture::QueueSend(BasicSetup& setup, QpPair& qp) {
   return QueueWork(setup, qp, WorkType::kSend);
 }
 
+int BatchOpFixture::QueueSendUd(BasicSetup& setup, QpPair& qp) {
+  return QueueWork(setup, qp, WorkType::kSendUd);
+}
+
 int BatchOpFixture::QueueWrite(BasicSetup& setup, QpPair& qp) {
   return QueueWork(setup, qp, WorkType::kWrite);
 }
@@ -77,6 +81,18 @@ int BatchOpFixture::QueueRecv(BasicSetup& setup, QpPair& qp) {
   auto dst_buffer =
       qp.dst_buffer.subspan(wr_id, 1);  // use wr_id as index to the buffer.
   ibv_sge sge = verbs_util::CreateSge(dst_buffer, setup.dst_mr);
+  ibv_recv_wr wqe = verbs_util::CreateRecvWr(wr_id, &sge, /*num_sge=*/1);
+  ibv_recv_wr* bad_wr;
+  return ibv_post_recv(qp.recv_qp, &wqe, &bad_wr);
+}
+
+int BatchOpFixture::QueueRecvUd(BasicSetup& setup, QpPair& qp) {
+  uint32_t wr_id = qp.next_recv_wr_id++;
+  DCHECK_LT(wr_id, setup.dst_memblock.size());
+  auto dst_buffer =
+      qp.dst_buffer.subspan(wr_id, 1);  // use wr_id as index to the buffer.
+  ibv_sge sge = verbs_util::CreateSge(dst_buffer, setup.dst_mr);
+  sge.length += sizeof(ibv_grh);
   ibv_recv_wr wqe = verbs_util::CreateRecvWr(wr_id, &sge, /*num_sge=*/1);
   ibv_recv_wr* bad_wr;
   return ibv_post_recv(qp.recv_qp, &wqe, &bad_wr);
@@ -119,6 +135,17 @@ int BatchOpFixture::QueueWork(BasicSetup& setup, QpPair& qp,
                                      dst_buffer.data(), setup.dst_mr->rkey);
       break;
     }
+    case WorkType::kSendUd: {
+      static constexpr int kQKey = 200;
+      wqe = verbs_util::CreateSendWr(wr_id, &sge, /*num_sge=*/1);
+      ibv_ah* ah =
+          ibv_.CreateAh(setup.pd, setup.port_attr.port,
+                        setup.port_attr.gid_index, setup.port_attr.gid);
+      wqe.wr.ud.ah = ah;
+      wqe.wr.ud.remote_qpn = qp.recv_qp->qp_num;
+      wqe.wr.ud.remote_qkey = kQKey;
+      break;
+    }
   }
   ibv_send_wr* bad_wr;
   return ibv_post_send(qp.send_qp, &wqe, &bad_wr);
@@ -151,6 +178,40 @@ BatchOpFixture::CreateTestQpPairs(BasicSetup& setup, ibv_cq* send_cq,
     }
     RETURN_IF_ERROR(ibv_.SetUpLoopbackRcQps(qp_pair.send_qp, qp_pair.recv_qp,
                                             setup.port_attr));
+    qp_pair.dst_buffer = setup.dst_memblock.subspan(i * max_qp_wr, max_qp_wr);
+    qp_pairs.push_back(qp_pair);
+  }
+  return qp_pairs;
+}
+
+absl::StatusOr<std::vector<BatchOpFixture::QpPair>>
+BatchOpFixture::CreateUdTestQpPairs(BasicSetup& setup, ibv_cq* send_cq,
+                                    ibv_cq* recv_cq, size_t max_qp_wr,
+                                    int count) {
+  if (max_qp_wr * count > setup.dst_memblock.size()) {
+    return absl::InternalError(
+        "Not enough space on destination buffer for all QPs.");
+  }
+  static constexpr int kQKey = 200;
+  std::vector<QpPair> qp_pairs;
+  for (int i = 0; i < count; ++i) {
+    QpPair qp_pair;
+    qp_pair.send_qp = ibv_.CreateQp(
+        setup.pd, send_cq, recv_cq, IBV_QPT_UD,
+        QpInitAttribute().set_max_send_wr(max_qp_wr).set_max_recv_wr(
+            max_qp_wr));
+    if (!qp_pair.send_qp) {
+      return absl::InternalError("Failed to create send qp.");
+    }
+    qp_pair.recv_qp = ibv_.CreateQp(
+        setup.pd, send_cq, recv_cq, IBV_QPT_UD,
+        QpInitAttribute().set_max_send_wr(max_qp_wr).set_max_recv_wr(
+            max_qp_wr));
+    if (!qp_pair.recv_qp) {
+      return absl::InternalError("Failed to create recv qp.");
+    }
+    RETURN_IF_ERROR(ibv_.ModifyUdQpResetToRts(qp_pair.send_qp, kQKey));
+    RETURN_IF_ERROR(ibv_.ModifyUdQpResetToRts(qp_pair.recv_qp, kQKey));
     qp_pair.dst_buffer = setup.dst_memblock.subspan(i * max_qp_wr, max_qp_wr);
     qp_pairs.push_back(qp_pair);
   }

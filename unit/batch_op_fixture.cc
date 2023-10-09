@@ -117,6 +117,7 @@ int BatchOpFixture::QueueWork(BasicSetup& setup, QpPair& qp,
     }
     case WorkType::kSendWithImm: {
       wqe = verbs_util::CreateSendWithImmWr(wr_id, &sge, /*num_sge=*/1);
+      wqe.imm_data = 0xBADDCAFE;
       break;
     }
     case WorkType::kWrite: {

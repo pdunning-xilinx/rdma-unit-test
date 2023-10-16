@@ -68,6 +68,28 @@ int GetIpAddressType(const ibv_gid& gid) {
   return AF_INET;
 }
 
+void PrintIpHeader(void* ip_hdr, int ip_family) {
+  uint8_t header_size;
+  if (ip_family == AF_INET) {
+    header_size = 20;
+    std::cout << "IPv4 header:" << std::endl;
+  }
+  else {
+    header_size = 40;
+    std::cout << "IPv6 header:" << std::endl;
+  }
+
+  std::cout << std::hex << std::setfill('0');
+  auto *ptr = reinterpret_cast<unsigned char *>(ip_hdr);
+  for (uint8_t i = 0; i < header_size; i++, ptr++) {
+    if (i && (i % 4 == 0)) {
+      std::cout << std::endl;
+    }
+    std::cout << std::setw(2) << static_cast<unsigned>(*ptr) << " ";
+  }
+  std::cout << std::endl;
+}
+
 std::string GidToString(const ibv_gid& gid) {
   return absl::StrFormat("GID: %x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x:%x",
                          gid.raw[0], gid.raw[1], gid.raw[2], gid.raw[3],

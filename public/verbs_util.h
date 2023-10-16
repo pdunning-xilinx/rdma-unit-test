@@ -79,6 +79,8 @@ int VerbsMtuToInt(ibv_mtu mtu);
 
 int GetIpAddressType(const ibv_gid& gid);
 
+void PrintIpHeader(void* ip_hdr, int ip_family);
+
 // Converts an uint64_t mtu to a ibv_mtu object.
 ibv_mtu ToVerbsMtu(uint64_t mtu);
 

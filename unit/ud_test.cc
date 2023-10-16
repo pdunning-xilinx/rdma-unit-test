@@ -65,10 +65,12 @@ class LoopbackUdQpTest : public LoopbackFixture {
 
  protected:
   absl::StatusOr<std::pair<Client, Client>> CreateUdClientsPair(
-      size_t pages = 1) {
-    ASSIGN_OR_RETURN(Client local, CreateClient(IBV_QPT_UD, pages));
+      size_t pages = 1, QpInitAttribute qp_init_attr = QpInitAttribute()) {
+    ASSIGN_OR_RETURN(Client local,
+                     CreateClient(IBV_QPT_UD, pages, qp_init_attr));
     std::fill_n(local.buffer.data(), local.buffer.size(), kLocalBufferContent);
-    ASSIGN_OR_RETURN(Client remote, CreateClient(IBV_QPT_UD, pages));
+    ASSIGN_OR_RETURN(Client remote,
+                     CreateClient(IBV_QPT_UD, pages, qp_init_attr));
     std::fill_n(remote.buffer.data(), remote.buffer.size(),
                 kRemoteBufferContent);
     RETURN_IF_ERROR(ibv_.ModifyUdQpResetToRts(local.qp, kQKey));
@@ -500,6 +502,122 @@ TEST_F(LoopbackUdQpTest, SendTrafficClass) {
   uint32_t version_tclass_flow = ntohl(grh->version_tclass_flow);
   uint8_t actual_traffic_class = version_tclass_flow >> 20 & 0xfc;
   EXPECT_EQ(actual_traffic_class & 0xfc, traffic_class & 0xfc);
+}
+
+TEST_F(LoopbackUdQpTest, SendHopLimit) {
+  constexpr int kPayloadLength = 1000;
+  constexpr uint8_t hop_limit = 0xff;
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateUdClientsPair());
+
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    rsge.length = kPayloadLength + sizeof(ibv_grh);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    lsge.length = kPayloadLength;
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    // Set with customized hop limit.
+    ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
+                               local.port_attr.gid_index, remote.port_attr.gid,
+                               AhAttribute().set_hop_limit(hop_limit));
+    ASSERT_THAT(ah, NotNull());
+    send.wr.ud.ah = ah;
+    send.wr.ud.remote_qpn = remote.qp->qp_num;
+    send.wr.ud.remote_qkey = kQKey;
+    verbs_util::PostSend(local.qp, send);
+
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    int ip_family = verbs_util::GetIpAddressType(remote.port_attr.gid);
+    ASSERT_NE(ip_family, -1);
+
+    if (ip_family == AF_INET) {
+      iphdr ipv4_hdr = ExtractIp4Header(remote.buffer.data());
+      uint8_t actual_ttl = ipv4_hdr.ttl;
+
+      if (FLAGS_logtostderr) verbs_util::PrintIpHeader(&ipv4_hdr, ip_family);
+      VLOG(1) << absl::StrCat("Configured hop limit: ", hop_limit);
+      VLOG(1) << absl::StrCat("Actual ttl: ", actual_ttl);
+      EXPECT_LE(actual_ttl, hop_limit);
+      return;
+    }
+    ibv_grh* grh = reinterpret_cast<ibv_grh*>(remote.buffer.data());
+    uint8_t actual_hop_limit = grh->hop_limit;
+
+    if (FLAGS_logtostderr) verbs_util::PrintIpHeader(grh, ip_family);
+    VLOG(1) << absl::StrCat("Configured hop limit: ", hop_limit);
+    VLOG(1) << absl::StrCat("Actual hop limit: ", actual_hop_limit);
+    EXPECT_LE(actual_hop_limit, hop_limit);
+  }
+}
+
+TEST_F(LoopbackUdQpTest, SendFlowLabel) {
+  constexpr int kPayloadLength = 1000;
+  constexpr uint32_t flow_label = 0xabcde;
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateUdClientsPair());
+
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    rsge.length = kPayloadLength + sizeof(ibv_grh);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    lsge.length = kPayloadLength;
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    // Set with customized flow label.
+    ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
+                               local.port_attr.gid_index, remote.port_attr.gid,
+                               AhAttribute().set_flow_label(flow_label));
+    ASSERT_THAT(ah, NotNull());
+    send.wr.ud.ah = ah;
+    send.wr.ud.remote_qpn = remote.qp->qp_num;
+    send.wr.ud.remote_qkey = kQKey;
+    verbs_util::PostSend(local.qp, send);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    int ip_family = verbs_util::GetIpAddressType(remote.port_attr.gid);
+    ASSERT_NE(ip_family, -1);
+
+    if (ip_family == AF_INET6) {
+      ibv_grh* grh = reinterpret_cast<ibv_grh*>(remote.buffer.data());
+      // 4 bits version, 8 bits traffic class, 20 bits flow label.
+      uint32_t version_tclass_flow = ntohl(grh->version_tclass_flow);
+      uint32_t actual_flow_label = version_tclass_flow & 0xfffff;
+      if (FLAGS_logtostderr) verbs_util::PrintIpHeader(grh, ip_family);
+      EXPECT_EQ(actual_flow_label, flow_label);
+    }
+  }
 }
 
 TEST_F(LoopbackUdQpTest, SendWithTooSmallRecv) {
@@ -1053,6 +1171,69 @@ TEST_F(LoopbackUdQpTest, CompareSwap) {
   EXPECT_EQ(completion.wr_id, 1);
   CheckClassDFaults(local, remote, /*recreate_local_qp=*/true,
                     /*post_recv_wqe=*/true);
+}
+
+TEST_F(LoopbackUdQpTest, RecvGrhSplitSgl) {
+  constexpr int kPayloadLength = 1000;  // Sub-MTU length for UD.
+  constexpr int kGrhHeaderBytes = sizeof(ibv_grh);
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote),
+                       CreateUdClientsPair(
+                           /*pages=*/1, QpInitAttribute().set_max_recv_sge(2)));
+
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_sge rsgl[2];
+    // First 30 bytes of GRH will be accommodated in rsgl[0]
+    // Reamining 10 bytes along with payload in rsgl[1]
+    rsgl[0] = verbs_util::CreateSge(remote.buffer.subspan(0, 30), remote.mr);
+    rsgl[1] = verbs_util::CreateSge(remote.buffer.subspan(30), remote.mr);
+    rsgl[1].length = kPayloadLength + 10;
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, rsgl, /*num_sge=*/2);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    lsge.length = kPayloadLength;
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
+                               local.port_attr.gid_index, remote.port_attr.gid);
+    ASSERT_THAT(ah, NotNull());
+    send.wr.ud.ah = ah;
+    send.wr.ud.remote_qpn = remote.qp->qp_num;
+    send.wr.ud.remote_qkey = kQKey;
+    verbs_util::PostSend(local.qp, send);
+
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RECV);
+    EXPECT_EQ(completion.byte_len, (kGrhHeaderBytes + kPayloadLength));
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    absl::Span<uint8_t> recv_payload =
+        remote.buffer.subspan(kGrhHeaderBytes, kPayloadLength);
+    EXPECT_THAT(recv_payload, Each(kLocalBufferContent));
+
+    int ip_family = verbs_util::GetIpAddressType(remote.port_attr.gid);
+    ASSERT_NE(ip_family, -1);
+    if (FLAGS_logtostderr) {
+      if (ip_family == AF_INET) {
+        verbs_util::PrintIpHeader(remote.buffer.data() + 20, ip_family);
+      } else {
+        verbs_util::PrintIpHeader(remote.buffer.data(), ip_family);
+      }
+    }
+  }
 }
 
 class AdvancedLoopbackTest : public RdmaVerbsFixture {

@@ -79,6 +79,8 @@ int VerbsMtuToInt(ibv_mtu mtu);
 
 int GetIpAddressType(const ibv_gid& gid);
 
+void PrintIpHeader(void* ip_hdr, int ip_family);
+
 // Converts an uint64_t mtu to a ibv_mtu object.
 ibv_mtu ToVerbsMtu(uint64_t mtu);
 
@@ -194,13 +196,17 @@ bool is_server();
 // States if the test case will be execute in Peer To Peer or Loopback mode.
 bool peer_mode();
 
+// Establish a QP connection between local & remote
+int connect_peer(struct ibv_qp* qp, int local_psn,
+                 struct conn_attr& remote_host, uint8_t port, int sgid_index);
+
 // Create TCP Server socket to exchange QP information
-int RunServer(struct ibv_qp* qp, const struct conn_attr* local_host,
-              uint8_t port, int sgid_index);
+int RunServer(const struct conn_attr& local_host,
+              struct conn_attr& remote_host);
 
 // Create TCP Client socket to exchange QP information
-int RunClient(struct ibv_qp* qp, const struct conn_attr* local_host,
-              uint8_t port, int sgid_index);
+int RunClient(const struct conn_attr& local_host,
+              struct conn_attr& remote_host);
 
 // Polls for and returns a completion.
 absl::StatusOr<ibv_wc> WaitForCompletion(

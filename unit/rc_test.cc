@@ -74,7 +74,7 @@ class LoopbackRcQpTest : public LoopbackFixture {
   absl::StatusOr<std::pair<Client, Client>> CreateConnectedClientsPair(
       int pages = kPages, QpInitAttribute qp_init_attr = QpInitAttribute(),
       QpAttribute qp_attr = QpAttribute()) {
-    struct verbs_util::conn_attr local_host;
+    struct verbs_util::conn_attr local_host, remote_host;
     int rc;
 
     ASSIGN_OR_RETURN(Client local,
@@ -102,16 +102,26 @@ class LoopbackRcQpTest : public LoopbackFixture {
       local_host.gid = local.port_attr.gid;
       local_host.lid = local.port_attr.attr.lid;
       local_host.qpn = local.qp->qp_num;
-      rc = verbs_util::RunClient(local.qp, &local_host, local.port_attr.port,
-                                 local.port_attr.gid_index);
+      rc = verbs_util::RunClient(local_host, remote_host);
+      if (rc) {
+        LOG(FATAL) << "Failed to get remote conn attributes, Err:" << rc;
+      }
+      rc = connect_peer(local.qp, local_host.psn, remote_host,
+                        remote.port_attr.port, remote.port_attr.gid_index);
     } else {
       local_host.gid = remote.port_attr.gid;
       local_host.lid = remote.port_attr.attr.lid;
       local_host.qpn = remote.qp->qp_num;
-      rc = verbs_util::RunServer(remote.qp, &local_host, remote.port_attr.port,
-                                 remote.port_attr.gid_index);
+      rc = verbs_util::RunServer(local_host, remote_host);
+      if (rc) {
+        LOG(FATAL) << "Failed to get remote conn attributes, Err:" << rc;
+      }
+      rc = connect_peer(remote.qp, local_host.psn, remote_host,
+                        remote.port_attr.port, remote.port_attr.gid_index);
     }
-    if (rc) LOG(FATAL) << "Failed to connect Peer node, Err:" << rc;
+    if (rc) {
+      LOG(FATAL) << "Failed to connect Peer node, Err:" << rc;
+    }
     return std::make_pair(local, remote);
   }
 

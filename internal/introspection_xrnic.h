@@ -152,6 +152,9 @@ class IntrospectionXRnic : public NicIntrospection {
 
         /* XRDRIV-1192 Inline data operation is not supported */
         {{"LoopbackUdQpTest", "SendInlineData"}, ""},
+
+        /* IPv6 is not supported */
+        {{"LoopbackUdQpTest", "SendFlowLabel"}, ""},
     };
     return deviations;
   }

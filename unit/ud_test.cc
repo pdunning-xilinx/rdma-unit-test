@@ -273,6 +273,166 @@ TEST_F(LoopbackUdQpTest, SendWithTooSmallRecv) {
   EXPECT_EQ(completion.wr_id, 1);
 }
 
+TEST_F(LoopbackUdQpTest, BadSendLkey) {
+  constexpr int kPayloadLength = 1000;  // Sub-MTU length for UD.
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateUdClientsPair());
+
+  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+  rsge.length = kPayloadLength + sizeof(ibv_grh);
+  ibv_recv_wr recv =
+      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+  verbs_util::PostRecv(remote.qp, recv);
+
+  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+  lsge.length = kPayloadLength;
+  // Garble the local sge key
+  lsge.lkey = (lsge.lkey + 10) * 5;
+  ibv_send_wr send =
+      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+  ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
+                             local.port_attr.gid_index, remote.port_attr.gid);
+  ASSERT_THAT(ah, NotNull());
+  send.wr.ud.ah = ah;
+  send.wr.ud.remote_qpn = remote.qp->qp_num;
+  send.wr.ud.remote_qkey = kQKey;
+  verbs_util::PostSend(local.qp, send);
+
+  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                       verbs_util::WaitForCompletion(local.cq));
+  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+  EXPECT_EQ(completion.wr_id, 1);
+
+  EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+}
+
+TEST_F(LoopbackUdQpTest, BadRecvLkey) {
+  constexpr int kPayloadLength = 1000;  // Sub-MTU length for UD.
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateUdClientsPair());
+
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    rsge.length = kPayloadLength + sizeof(ibv_grh);
+    // Garble the remote sge key
+    rsge.lkey = (rsge.lkey + 10) * 5;
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    lsge.length = kPayloadLength;
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
+                               local.port_attr.gid_index,
+                               remote.port_attr.gid);
+    ASSERT_THAT(ah, NotNull());
+    send.wr.ud.ah = ah;
+    send.wr.ud.remote_qpn = remote.qp->qp_num;
+    send.wr.ud.remote_qkey = kQKey;
+    verbs_util::PostSend(local.qp, send);
+
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+  }
+}
+
+TEST_F(LoopbackUdQpTest, BadSendAddr) {
+  constexpr int kPayloadLength = 1000;  // Sub-MTU length for UD.
+
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateUdClientsPair());
+
+  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+  rsge.length = kPayloadLength + sizeof(ibv_grh);
+  ibv_recv_wr recv =
+      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+  verbs_util::PostRecv(remote.qp, recv);
+
+  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+  lsge.length = kPayloadLength;
+  // Modify the local sge address to invalid address
+  --lsge.addr;
+  ibv_send_wr send =
+      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+  ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
+                             local.port_attr.gid_index, remote.port_attr.gid);
+  ASSERT_THAT(ah, NotNull());
+  send.wr.ud.ah = ah;
+  send.wr.ud.remote_qpn = remote.qp->qp_num;
+  send.wr.ud.remote_qkey = kQKey;
+  verbs_util::PostSend(local.qp, send);
+
+  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                       verbs_util::WaitForCompletion(local.cq));
+  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+  EXPECT_EQ(completion.wr_id, 1);
+
+  EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+}
+
+TEST_F(LoopbackUdQpTest, BadRecvAddr) {
+  constexpr int kPayloadLength = 1000;  // Sub-MTU length for UD.
+
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateUdClientsPair());
+
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    rsge.length = kPayloadLength + sizeof(ibv_grh);
+    // Modify the remote sge address to invalid address
+    --rsge.addr;
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    lsge.length = kPayloadLength;
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
+                               local.port_attr.gid_index,
+                               remote.port_attr.gid);
+    ASSERT_THAT(ah, NotNull());
+    send.wr.ud.ah = ah;
+    send.wr.ud.remote_qpn = remote.qp->qp_num;
+    send.wr.ud.remote_qkey = kQKey;
+    verbs_util::PostSend(local.qp, send);
+
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+  }
+}
+
 TEST_F(LoopbackUdQpTest, SendInvalidAh) {
   constexpr int kPayloadLength = 1000;  // Sub-MTU length for UD.
   Client local, remote;

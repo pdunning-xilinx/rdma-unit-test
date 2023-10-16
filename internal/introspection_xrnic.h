@@ -142,6 +142,13 @@ class IntrospectionXRnic : public NicIntrospection {
 
         /* RNR is not supported */
         {{"RnrRecoverTest", "RnrRecoverTests"}, ""},
+
+        /* XRDRIV-1192 Model does not support error reporting */
+        /* Timeout while waiting for a completion */
+        {{"LoopbackUdQpTest", "BadSendLkey"}, ""},
+        {{"LoopbackUdQpTest", "BadRecvLkey"}, ""},
+        {{"LoopbackUdQpTest", "BadSendAddr"}, ""},
+        {{"LoopbackUdQpTest", "BadRecvAddr"}, ""},
     };
     return deviations;
   }

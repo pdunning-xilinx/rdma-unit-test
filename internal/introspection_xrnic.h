@@ -142,6 +142,9 @@ class IntrospectionXRnic : public NicIntrospection {
       {{"LoopbackUdQpTest", "BadRecvLkey"}, ""},
       {{"LoopbackUdQpTest", "BadSendAddr"}, ""},
       {{"LoopbackUdQpTest", "BadRecvAddr"}, ""},
+
+      /* XRDRIV-1192 Inline data operation is not supported */
+      {{"LoopbackUdQpTest", "SendInlineData"}, ""},
     };
     return deviations;
   }

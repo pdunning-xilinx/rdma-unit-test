@@ -24,6 +24,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "infiniband/verbs.h"
 #include "internal/handle_garble.h"
@@ -1013,4 +1014,156 @@ INSTANTIATE_TEST_SUITE_P(
 
 // TODO(author1): Test larger MTU than the device allows
 
+struct QpStateTransition {
+  ibv_qp_state src_state;
+  ibv_qp_state dst_state;
+  bool valid;
+};
+
+class ModifyQpState : public QpTest,
+                      public testing::WithParamInterface<QpStateTransition> {
+ public:
+  int ErrRcQP(ibv_qp* qp) const {
+    // Modify QP State to ERR state
+    ibv_qp_attr attr;
+    attr.qp_state = IBV_QPS_ERR;
+    ibv_qp_attr_mask attr_mask = IBV_QP_STATE;
+    return ibv_modify_qp(qp, &attr, attr_mask);
+  }
+  absl::Status SetQpState(ibv_qp* qp, BasicSetup setup, ibv_qp_state qp_state) {
+    // Move QP state from Reset to qp_state
+    QpAttribute qp_attr = QpAttribute().set_timeout(absl::Seconds(1));
+    int result_code;
+    switch (qp_state) {
+      case IBV_QPS_RESET:
+        return absl::OkStatus();
+      // Reset -> Init
+      case IBV_QPS_INIT:
+        result_code = InitRcQP(qp);
+	if (result_code) {
+	  return absl::InternalError(absl::StrFormat(
+	               "Modified QP from RESET to INIT failed (%d).",
+		       result_code));
+	}
+	return absl::OkStatus();
+      // Reset -> RTR
+      case IBV_QPS_RTR:
+        return(ibv_.ModifyRcQpResetToRtr(qp, setup.port_attr,
+                                         setup.port_attr.gid,qp->qp_num,
+                                         qp_attr));
+      // Reset -> RTS
+      case IBV_QPS_RTS:
+        return(ibv_.ModifyRcQpResetToRts(qp, setup.port_attr,
+                                         setup.port_attr.gid,qp->qp_num,
+                                         qp_attr));
+      // Reset -> SQD
+      case IBV_QPS_SQD:
+        return(ibv_.ModifyRcQpResetToSqd(qp, setup.port_attr,
+                                         setup.port_attr.gid,qp->qp_num,
+                                         qp_attr));
+      // Reset -> ERR
+      case IBV_QPS_ERR:
+        result_code = InitRcQP(qp);
+        if (result_code) {
+          return absl::InternalError(absl::StrFormat(
+                       "Modified QP from RESET to INIT failed (%d).",
+                       result_code));
+        }
+        result_code = ErrRcQP(qp);
+        if (result_code) {
+          return absl::InternalError(absl::StrFormat(
+                       "Modified QP from INIT to ERR failed (%d).",
+                       result_code));
+	}
+        return absl::OkStatus();
+    }
+  }
+};
+
+TEST_P(ModifyQpState, ModifyQpStateTest) {
+  ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
+  ibv_qp* qp = ibv_.CreateQp(setup.pd, setup.basic_attr);
+  ASSERT_THAT(qp, NotNull());
+  const QpStateTransition& kTestCase = GetParam();
+  // Move QP to src_state
+  ASSERT_OK(SetQpState(qp, setup, kTestCase.src_state));
+  ASSERT_EQ(verbs_util::GetQpState(qp), kTestCase.src_state);
+  ibv_qp_attr attr;
+  attr.qp_state = kTestCase.dst_state;
+  ibv_qp_attr_mask attr_mask = IBV_QP_STATE;
+  // Execute valid transitions and expect success
+  if (kTestCase.valid) {
+    ASSERT_EQ(ibv_modify_qp(qp, &attr, attr_mask), 0);
+    ASSERT_EQ(verbs_util::GetQpState(qp), kTestCase.dst_state);
+  }
+  // Execute Invalid transitions and expect failure
+  else {
+    ASSERT_NE(ibv_modify_qp(qp, &attr, attr_mask), 0);
+  }
+}
+
+std::vector<QpStateTransition> GenerateModifyQpStateParameters() {
+  // Generate valid and invalid QP transitions
+  std::vector<QpStateTransition> params;
+  const int no_of_states = 7;
+  // 0 is for invalid
+  // 1 is for valid
+  // 2 is for exclude
+  // Reset to Init, Init to RTR and RTR to RTS are covered in QpTest.Modify
+  // SQE is not supported in RC QP
+  int state_transition_map[no_of_states][no_of_states] = {
+    /*         RESET INIT RTR RTS SQD SQE ERR*/
+    /* RESET */ {1,   2,   0,  0,  0,  0,  0},
+    /* INIT */  {1,   1,   2,  0,  0,  0,  1},
+    /* RTR */   {1,   0,   0,  2,  0,  0,  1},
+    /* RTS */   {1,   0,   0,  1,  1,  0,  1},
+    /* SQD */   {1,   0,   0,  1,  1,  0,  1},
+    /* SQE */   {2,   2,   2,  2,  2,  2,  2},
+    /* ERR */   {1,   0,   0,  0,  0,  0,  1}
+    };
+    for (int i = 0; i < no_of_states; i++) {
+      for (int j = 0; j < no_of_states; j++) {
+        if (state_transition_map[i][j] == 2) {
+          continue;
+        }
+        QpStateTransition param {
+          .src_state = static_cast<ibv_qp_state>(i),
+          .dst_state = static_cast<ibv_qp_state>(j),
+          .valid = state_transition_map[i][j]
+        };
+        params.push_back(param);
+      }
+    }
+  return params;
+}
+
+std::string qp_state_enum_str(ibv_qp_state qp_state) {
+  switch (qp_state) {
+   case IBV_QPS_RESET:
+     return "Reset";
+   case IBV_QPS_INIT:
+     return "Init";
+   case IBV_QPS_RTR:
+     return "RTR";
+   case IBV_QPS_RTS:
+     return "RTS";
+   case IBV_QPS_SQD:
+     return "SQD";
+   case IBV_QPS_SQE:
+     return "SQE";
+   case IBV_QPS_ERR:
+     return "ERR";
+   default:
+     return "Unknown";
+  }
+}
+INSTANTIATE_TEST_SUITE_P(
+    QpStateTest, ModifyQpState,
+    testing::ValuesIn(GenerateModifyQpStateParameters()),
+    [](const testing::TestParamInfo<ModifyQpState::ParamType>& info) {
+      std::string src_state = qp_state_enum_str(info.param.src_state);
+      std::string dst_state = qp_state_enum_str(info.param.dst_state);
+      std::string valid=info.param.valid ? "Valid":"Invalid";
+      return absl::StrCat("Modify",src_state,"To",dst_state,valid);
+    });
 }  // namespace rdma_unit_test

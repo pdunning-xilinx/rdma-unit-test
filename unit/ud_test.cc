@@ -188,41 +188,48 @@ class LoopbackUdQpTest : public LoopbackFixture {
 TEST_F(LoopbackUdQpTest, Send) {
   constexpr int kPayloadLength = 1000;  // Sub-MTU length for UD.
   Client local, remote;
+  ibv_wc completion;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateUdClientsPair());
 
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  rsge.length = kPayloadLength + sizeof(ibv_grh);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    rsge.length = kPayloadLength + sizeof(ibv_grh);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  lsge.length = kPayloadLength;
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
-                             local.port_attr.gid_index, remote.port_attr.gid);
-  ASSERT_THAT(ah, NotNull());
-  send.wr.ud.ah = ah;
-  send.wr.ud.remote_qpn = remote.qp->qp_num;
-  send.wr.ud.remote_qkey = kQKey;
-  verbs_util::PostSend(local.qp, send);
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    lsge.length = kPayloadLength;
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
+                               local.port_attr.gid_index, remote.port_attr.gid);
+    ASSERT_THAT(ah, NotNull());
+    send.wr.ud.ah = ah;
+    send.wr.ud.remote_qpn = remote.qp->qp_num;
+    send.wr.ud.remote_qkey = kQKey;
+    verbs_util::PostSend(local.qp, send);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RECV);
-  EXPECT_EQ(completion.byte_len, sizeof(ibv_grh) + kPayloadLength);
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
-  absl::Span<uint8_t> recv_payload =
-      remote.buffer.subspan(sizeof(ibv_grh), kPayloadLength);
-  EXPECT_THAT(recv_payload, Each(kLocalBufferContent));
+    ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RECV);
+    EXPECT_EQ(completion.byte_len, sizeof(ibv_grh) + kPayloadLength);
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    absl::Span<uint8_t> recv_payload =
+        remote.buffer.subspan(sizeof(ibv_grh), kPayloadLength);
+    EXPECT_THAT(recv_payload, Each(kLocalBufferContent));
+  }
 }
 
 TEST_F(LoopbackUdQpTest, SendImmData) {
@@ -492,52 +499,61 @@ TEST_F(LoopbackUdQpTest, SendTrafficClass) {
   constexpr uint8_t traffic_class = 0xff;
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateUdClientsPair());
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  rsge.length = kPayloadLength + sizeof(ibv_grh);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  lsge.length = kPayloadLength;
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  // Set with customized traffic class.
-  ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
-                             local.port_attr.gid_index, remote.port_attr.gid,
-                             AhAttribute().set_traffic_class(traffic_class));
-  ASSERT_THAT(ah, NotNull());
-  send.wr.ud.ah = ah;
-  send.wr.ud.remote_qpn = remote.qp->qp_num;
-  send.wr.ud.remote_qkey = kQKey;
-  verbs_util::PostSend(local.qp, send);
-
-  ASSERT_OK_AND_ASSIGN(ibv_wc send_completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  ASSERT_OK_AND_ASSIGN(ibv_wc recv_completion,
-                       verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(send_completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(recv_completion.status, IBV_WC_SUCCESS);
-  int ip_family = verbs_util::GetIpAddressType(local.port_attr.gid);
-  ASSERT_NE(ip_family, -1);
-  // On RoCE 2.0, the GRH (global routing header) is replaced by the IP header.
-  if (ip_family == AF_INET) {
-    // The ipv4 header is located at the lower bytes bits of the GRH. The higher
-    // 20 bytes are undefined.
-    // According to IPV4 header format and ROCEV2 Annex A17.4.5.2
-    // Last 2 bits might be used for ECN
-    iphdr ipv4_hdr = ExtractIp4Header(remote.buffer.data());
-    uint8_t actual_traffic_class = ipv4_hdr.tos;
-    EXPECT_EQ(actual_traffic_class & 0xfc, traffic_class & 0xfc);
-    return;
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    rsge.length = kPayloadLength + sizeof(ibv_grh);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
   }
-  // According to IPV6 header format and ROCEV2 Annex A17.4.5.2
-  // Last 2 bits might be used for ECN
-  ibv_grh* grh = reinterpret_cast<ibv_grh*>(remote.buffer.data());
-  // 4 bits version, 8 bits traffic class, 20 bits flow label.
-  uint32_t version_tclass_flow = ntohl(grh->version_tclass_flow);
-  uint8_t actual_traffic_class = version_tclass_flow >> 20 & 0xfc;
-  EXPECT_EQ(actual_traffic_class & 0xfc, traffic_class & 0xfc);
+
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    lsge.length = kPayloadLength;
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    // Set with customized traffic class.
+    ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
+                               local.port_attr.gid_index, remote.port_attr.gid,
+                               AhAttribute().set_traffic_class(traffic_class));
+    ASSERT_THAT(ah, NotNull());
+    send.wr.ud.ah = ah;
+    send.wr.ud.remote_qpn = remote.qp->qp_num;
+    send.wr.ud.remote_qkey = kQKey;
+    verbs_util::PostSend(local.qp, send);
+
+    ASSERT_OK_AND_ASSIGN(ibv_wc send_completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(send_completion.status, IBV_WC_SUCCESS);
+  }
+
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc recv_completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(recv_completion.status, IBV_WC_SUCCESS);
+
+    int ip_family = verbs_util::GetIpAddressType(local.port_attr.gid);
+    ASSERT_NE(ip_family, -1);
+    // On RoCE 2.0, the GRH (global routing header) is replaced by the IP header.
+    if (ip_family == AF_INET) {
+      // The ipv4 header is located at the lower bytes bits of the GRH. The higher
+      // 20 bytes are undefined.
+      // According to IPV4 header format and ROCEV2 Annex A17.4.5.2
+      // Last 2 bits might be used for ECN
+      iphdr ipv4_hdr = ExtractIp4Header(remote.buffer.data());
+      uint8_t actual_traffic_class = ipv4_hdr.tos;
+      EXPECT_EQ(actual_traffic_class & 0xfc, traffic_class & 0xfc);
+      return;
+    }
+    // According to IPV6 header format and ROCEV2 Annex A17.4.5.2
+    // Last 2 bits might be used for ECN
+    ibv_grh* grh = reinterpret_cast<ibv_grh*>(remote.buffer.data());
+    // 4 bits version, 8 bits traffic class, 20 bits flow label.
+    uint32_t version_tclass_flow = ntohl(grh->version_tclass_flow);
+    uint8_t actual_traffic_class = version_tclass_flow >> 20 & 0xfc;
+    EXPECT_EQ(actual_traffic_class & 0xfc, traffic_class & 0xfc);
+  }
 }
 
 TEST_F(LoopbackUdQpTest, SendHopLimit) {
@@ -909,36 +925,43 @@ TEST_F(LoopbackUdQpTest, SendInvalidQpn) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateUdClientsPair());
 
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  rsge.length = kPayloadLength + sizeof(ibv_grh);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    rsge.length = kPayloadLength + sizeof(ibv_grh);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  lsge.length = kPayloadLength;
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
-                             local.port_attr.gid_index, remote.port_attr.gid);
-  ASSERT_THAT(ah, NotNull());
-  send.wr.ud.ah = ah;
-  send.wr.ud.remote_qpn = 0xDEADBEEF;
-  send.wr.ud.remote_qkey = kQKey;
-  verbs_util::PostSend(local.qp, send);
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    lsge.length = kPayloadLength;
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
+                               local.port_attr.gid_index, remote.port_attr.gid);
+    ASSERT_THAT(ah, NotNull());
+    send.wr.ud.ah = ah;
+    send.wr.ud.remote_qpn = 0xDEADBEEF;
+    send.wr.ud.remote_qkey = kQKey;
+    verbs_util::PostSend(local.qp, send);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
-  absl::Span<uint8_t> recv_payload =
-      remote.buffer.subspan(sizeof(ibv_grh), kPayloadLength);
-  EXPECT_THAT(recv_payload, Each(kRemoteBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+    absl::Span<uint8_t> recv_payload =
+        remote.buffer.subspan(sizeof(ibv_grh), kPayloadLength);
+    EXPECT_THAT(recv_payload, Each(kRemoteBufferContent));
   CheckClassDFaults(local, remote, /*recreate_local_qp=*/false,
                     /*post_recv_wqe=*/false);
+  }
 }
 
 TEST_F(LoopbackUdQpTest, SendInvalidQKey) {
@@ -946,37 +969,44 @@ TEST_F(LoopbackUdQpTest, SendInvalidQKey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateUdClientsPair());
 
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  rsge.length = kPayloadLength + sizeof(ibv_grh);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    rsge.length = kPayloadLength + sizeof(ibv_grh);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  lsge.length = kPayloadLength;
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
-                             local.port_attr.gid_index, remote.port_attr.gid);
-  ASSERT_THAT(ah, NotNull());
-  send.wr.ud.ah = ah;
-  send.wr.ud.remote_qpn = remote.qp->qp_num;
-  // MSB of remote_qkey must be unset for SR's QKey to be effective.
-  send.wr.ud.remote_qkey = 0xDEADBEEF & 0x7FFFFFF;
-  verbs_util::PostSend(local.qp, send);
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    lsge.length = kPayloadLength;
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
+                               local.port_attr.gid_index, remote.port_attr.gid);
+    ASSERT_THAT(ah, NotNull());
+    send.wr.ud.ah = ah;
+    send.wr.ud.remote_qpn = remote.qp->qp_num;
+    // MSB of remote_qkey must be unset for SR's QKey to be effective.
+    send.wr.ud.remote_qkey = 0xDEADBEEF & 0x7FFFFFF;
+    verbs_util::PostSend(local.qp, send);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_THAT(completion.status, AnyOf(IBV_WC_SUCCESS, IBV_WC_GENERAL_ERR));
-  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
-  absl::Span<uint8_t> recv_payload =
-      remote.buffer.subspan(sizeof(ibv_grh), kPayloadLength);
-  EXPECT_THAT(recv_payload, Each(kRemoteBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_THAT(completion.status, AnyOf(IBV_WC_SUCCESS, IBV_WC_GENERAL_ERR));
+    EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+    absl::Span<uint8_t> recv_payload =
+        remote.buffer.subspan(sizeof(ibv_grh), kPayloadLength);
+    EXPECT_THAT(recv_payload, Each(kRemoteBufferContent));
   CheckClassDFaults(local, remote, /*recreate_local_qp=*/false,
                     /*post_recv_wqe=*/false);
+  }
 }
 
 TEST_F(LoopbackUdQpTest, SendRecvBatchedWr) {
@@ -1079,54 +1109,64 @@ TEST_F(LoopbackUdQpTest, Read) {
 // Tests polling multiple CQE in a single call.
 TEST_F(LoopbackUdQpTest, PollMultipleCqe) {
   Client local, remote;
+  ibv_send_wr send;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateUdClientsPair());
   static constexpr int kNumCompletions = 5;
   static constexpr int kPayloadLength = 1000;  // Sub-MTU length for UD.
 
-  ibv_sge recv_sge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  recv_sge.length = kPayloadLength + sizeof(ibv_grh);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &recv_sge, /*num_sge=*/1);
-  for (int i = 0; i < kNumCompletions; ++i) {
-    verbs_util::PostRecv(remote.qp, recv);
-  }
-  ibv_sge send_sge =
-      verbs_util::CreateSge(local.buffer.subspan(0, kPayloadLength), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &send_sge, /*num_sge=*/1);
-  ibv_ah* ah = ibv_.CreateLoopbackAh(local.pd, remote.port_attr);
-  ASSERT_THAT(ah, NotNull());
-  send.wr.ud.ah = ah;
-  send.wr.ud.remote_qpn = remote.qp->qp_num;
-  send.wr.ud.remote_qkey = kQKey;
-  for (int i = 0; i < kNumCompletions; ++i) {
-    verbs_util::PostSend(local.qp, send);
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_sge recv_sge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    recv_sge.length = kPayloadLength + sizeof(ibv_grh);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &recv_sge, /*num_sge=*/1);
+    for (int i = 0; i < kNumCompletions; ++i) {
+      verbs_util::PostRecv(remote.qp, recv);
+    }
   }
 
-  // Wait for recv completions.
-  for (int i = 0; i < kNumCompletions; ++i) {
-    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                         verbs_util::WaitForCompletion(remote.cq));
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_sge send_sge =
+        verbs_util::CreateSge(local.buffer.subspan(0, kPayloadLength), local.mr);
+    send = verbs_util::CreateSendWr(/*wr_id=*/1, &send_sge, /*num_sge=*/1);
+    ibv_ah* ah = ibv_.CreateLoopbackAh(local.pd, remote.port_attr);
+    ASSERT_THAT(ah, NotNull());
+    send.wr.ud.ah = ah;
+    send.wr.ud.remote_qpn = remote.qp->qp_num;
+    send.wr.ud.remote_qkey = kQKey;
+    for (int i = 0; i < kNumCompletions; ++i) {
+      verbs_util::PostSend(local.qp, send);
+    }
+  }
+
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    // Wait for recv completions.
+    for (int i = 0; i < kNumCompletions; ++i) {
+      ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                           verbs_util::WaitForCompletion(remote.cq));
+      EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+      EXPECT_EQ(completion.opcode, IBV_WC_RECV);
+      EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    }
+  }
+
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    int count = 0;
+    ibv_wc result[kNumCompletions + 1];
+    // This is inherantly racy, just because recv posted doesn't mean send
+    // completion is there yet.  Allow up to 1 second for completions to arrive.
+    absl::Time stop = absl::Now() + absl::Seconds(1);
+    while (count != kNumCompletions && absl::Now() < stop) {
+      count += ibv_poll_cq(local.cq, kNumCompletions + 1, &result[count]);
+    }
+    ASSERT_EQ(kNumCompletions, count)
+        << "Missing completions see comment above about potential race.";
+    // Spot check last completion.
+    ibv_wc& completion = result[kNumCompletions - 1];
     EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-    EXPECT_EQ(completion.opcode, IBV_WC_RECV);
-    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(send.wr_id, completion.wr_id);
   }
-  int count = 0;
-  ibv_wc result[kNumCompletions + 1];
-  // // This is inherantly racy, just because recv posted doesn't mean send
-  // completion is there yet.  Allow up to 1 second for completions to arrive.
-  absl::Time stop = absl::Now() + absl::Seconds(1);
-  while (count != kNumCompletions && absl::Now() < stop) {
-    count += ibv_poll_cq(local.cq, kNumCompletions + 1, &result[count]);
-  }
-  ASSERT_EQ(kNumCompletions, count)
-      << "Missing completions see comment above about potential race.";
-  // Spot check last completion.
-  ibv_wc& completion = result[kNumCompletions - 1];
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(send.wr_id, completion.wr_id);
 }
 
 // Write not supported on Ud.

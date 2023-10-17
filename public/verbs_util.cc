@@ -373,9 +373,9 @@ bool peer_mode() {
   return (is_client() || is_server()) ? true : false;
 }
 
-static int connect_peer(struct ibv_qp *qp, int local_psn,
-			struct conn_attr *remote_host, uint8_t port,
-			int sgid_index)
+int connect_peer(struct ibv_qp *qp, int local_psn,
+		 struct conn_attr &remote_host, uint8_t port,
+		 int sgid_index)
 {
   // Attributes for bringing QP from RESET to INIT state.
   const unsigned int qp_access_flags = IBV_ACCESS_REMOTE_WRITE |
@@ -412,9 +412,9 @@ static int connect_peer(struct ibv_qp *qp, int local_psn,
   // Change QP state to Ready To Receive state
   attr.qp_state               = IBV_QPS_RTR;
   attr.path_mtu               = IBV_MTU_1024;
-  attr.rq_psn                 = remote_host->psn;
-  attr.dest_qp_num            = remote_host->qpn;
-  attr.ah_attr.dlid           = remote_host->lid;
+  attr.rq_psn                 = remote_host.psn;
+  attr.dest_qp_num            = remote_host.qpn;
+  attr.ah_attr.dlid           = remote_host.lid;
   attr.ah_attr.sl             = sl;
   attr.ah_attr.src_path_bits  = 0;
   attr.ah_attr.is_global      = 0;
@@ -422,10 +422,10 @@ static int connect_peer(struct ibv_qp *qp, int local_psn,
   attr.max_dest_rd_atomic     = max_rd_atomic;
   attr.min_rnr_timer          = min_rnr_timer;
 
-  if (remote_host->gid.global.interface_id) {
+  if (remote_host.gid.global.interface_id) {
     attr.ah_attr.is_global = 1;
     attr.ah_attr.grh.hop_limit = hop_limit;
-    attr.ah_attr.grh.dgid = remote_host->gid;
+    attr.ah_attr.grh.dgid = remote_host.gid;
     attr.ah_attr.grh.sgid_index = sgid_index;
   }
 
@@ -475,11 +475,10 @@ static void gid_to_wire_gid(const union ibv_gid *gid, char wgid[])
     sprintf(&wgid[i * 8], "%08x", htobe32(tmp_gid[i]));
 }
 
-int RunServer(struct ibv_qp *qp, const struct conn_attr *local_host,
-	      uint8_t port, int sgid_index) {
+int RunServer(const struct conn_attr &local_host,
+	      struct conn_attr &remote_host) {
   // Message to share the connection attributes with Client
   char msg[sizeof "0000:000000:000000:00000000000000000000000000000000"];
-  struct conn_attr remote_host;
   struct sockaddr_in address;
   int addrlen = sizeof(address);
   int backlog = 0;
@@ -491,13 +490,15 @@ int RunServer(struct ibv_qp *qp, const struct conn_attr *local_host,
 
   // Creating socket file descriptor
   server_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (server_fd == -1)
+  if (server_fd == -1) {
     LOG(FATAL) << "Server: Socket creation failed";
+  }
 
   if (setsockopt(server_fd, SOL_SOCKET,
                  SO_REUSEADDR | SO_REUSEPORT,
-                 &opt, sizeof(opt)))
+                 &opt, sizeof(opt))) {
     LOG(FATAL) << "Server: Setsockopt Failed";
+  }
 
   address.sin_family = AF_INET;
   address.sin_addr.s_addr = INADDR_ANY;
@@ -521,33 +522,36 @@ int RunServer(struct ibv_qp *qp, const struct conn_attr *local_host,
 
   if ((rc = read(new_socket, msg, sizeof msg)) != sizeof msg) {
     LOG(ERROR) << "Server: Couldn't read remote address";
-    if (rc == -1)
-      rc = errno;
-    else
-      rc = -EMSGSIZE;
+    if (rc == -1) {
+      LOG(ERROR) << "Server: Read failed, error:" << errno;
+    }
+    else {
+      LOG(ERROR) << "Server: Read returned " << rc << " bytes";
+    }
     goto out;
   }
 
+  // storing received message to remote conn attributes
   sscanf(msg, "%hu:%x:%x:%s", &remote_host.lid, &remote_host.qpn,
 			      &remote_host.psn, gid);
   wire_gid_to_gid(gid, &remote_host.gid);
 
-  gid_to_wire_gid(&local_host->gid, gid);
-  sprintf(msg, "%04x:%06x:%06x:%s", local_host->lid, local_host->qpn,
-          local_host->psn, gid);
+  // preparing message to send local conn attributes
+  gid_to_wire_gid(&local_host.gid, gid);
+  sprintf(msg, "%04x:%06x:%06x:%s", local_host.lid, local_host.qpn,
+          local_host.psn, gid);
 
   if ((rc = write(new_socket, msg, sizeof msg)) != sizeof msg) {
-    LOG(ERROR) << "Server: Couldn't send/recv local address";
-    if (rc == -1)
-      rc = errno;
-    else
-      rc = -EMSGSIZE;
+    LOG(ERROR) << "Server: Couldn't send local address";
+    if (rc == -1) {
+      LOG(ERROR) << "Server: Write failed, error:" << errno;
+    }
+    else {
+      LOG(ERROR) << "Server: Write returned " << rc << " bytes";
+    }
     goto out;
   }
-
-  rc = connect_peer(qp, local_host->psn, &remote_host, port, sgid_index);
-  if (rc)
-    LOG(ERROR) << "Couldn't connect to remote QP";
+  rc = 0;
 
 out:
   // closing the connected socket
@@ -557,11 +561,10 @@ out:
   return rc;
 }
 
-int RunClient(struct ibv_qp *qp, const struct conn_attr *local_host,
-	      uint8_t port, int sgid_index) {
+int RunClient(const struct conn_attr &local_host,
+	      struct conn_attr &remote_host) {
   // Message to share the connection attributes with Server
   char msg[sizeof "0000:000000:000000:00000000000000000000000000000000"];
-  struct conn_attr remote_host;
   struct sockaddr_in serv_addr;
   int client_fd;
   char gid[33];
@@ -569,8 +572,9 @@ int RunClient(struct ibv_qp *qp, const struct conn_attr *local_host,
 
   // Code for Client Connection
   client_fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (client_fd == -1)
+  if (client_fd == -1) {
     LOG(FATAL) << "Client: Socket creation failed";
+  }
 
   serv_addr.sin_family = AF_INET;
   serv_addr.sin_port = htons(absl::GetFlag(FLAGS_peer_port));
@@ -579,45 +583,47 @@ int RunClient(struct ibv_qp *qp, const struct conn_attr *local_host,
   if (inet_pton(AF_INET, absl::GetFlag(FLAGS_server_ip).c_str(),
 		&serv_addr.sin_addr) <= 0) {
     LOG(ERROR) << "Client: Invalid address/ Address not supported";
-    rc = -EINVAL;
     goto out;
   }
 
   rc = connect(client_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
   if (rc) {
-    LOG(ERROR) << "Client: Connect failed";
+    LOG(ERROR) << "Client: Connect failed, rc:" << rc;
     goto out;
   }
 
-  gid_to_wire_gid(&local_host->gid, gid);
-  sprintf(msg, "%04x:%06x:%06x:%s", local_host->lid, local_host->qpn,
-          local_host->psn, gid);
+  // preparing message to send local conn attributes
+  gid_to_wire_gid(&local_host.gid, gid);
+  sprintf(msg, "%04x:%06x:%06x:%s", local_host.lid, local_host.qpn,
+          local_host.psn, gid);
 
   if ((rc = write(client_fd, msg, sizeof msg)) != sizeof msg) {
     LOG(ERROR) << "Client: Couldn't send local address";
-    if (rc == -1)
-      rc = errno;
-    else
-      rc = -EMSGSIZE;
+    if (rc == -1) {
+      LOG(ERROR) << "Client: Write failed, error:" << errno;
+    }
+    else {
+      LOG(ERROR) << "Client: Write returned " << rc << " bytes";
+    }
     goto out;
   }
 
   if ((rc = read(client_fd, msg, sizeof msg)) != sizeof msg) {
-    LOG(ERROR) <<  "Couldn't read/write remote address";
-    if (rc == -1)
-      rc = errno;
-    else
-      rc = -EMSGSIZE;
+    LOG(ERROR) <<  "Couldn't read remote address";
+    if (rc == -1) {
+      LOG(ERROR) << "Client: Read failed, error:" << errno;
+    }
+    else {
+      LOG(ERROR) << "Client: Read returned " << rc << " bytes";
+    }
     goto out;
   }
+  rc = 0;
 
+  // storing received message to remote conn attributes
   sscanf(msg, "%hu:%x:%x:%s", &remote_host.lid, &remote_host.qpn,
 			      &remote_host.psn, gid);
   wire_gid_to_gid(gid, &remote_host.gid);
-
-  rc = connect_peer(qp, local_host->psn, &remote_host, port, sgid_index);
-  if (rc)
-    LOG(ERROR) << "Couldn't connect to remote QP";
 
 out:
   // closing the connected socket

@@ -66,6 +66,9 @@ class LoopbackUdQpTest : public LoopbackFixture {
  protected:
   absl::StatusOr<std::pair<Client, Client>> CreateUdClientsPair(
       size_t pages = 1, QpInitAttribute qp_init_attr = QpInitAttribute()) {
+    struct verbs_util::conn_attr local_host, remote_host;
+    int rc;
+
     ASSIGN_OR_RETURN(Client local,
                      CreateClient(IBV_QPT_UD, pages, qp_init_attr));
     std::fill_n(local.buffer.data(), local.buffer.size(), kLocalBufferContent);
@@ -73,8 +76,37 @@ class LoopbackUdQpTest : public LoopbackFixture {
                      CreateClient(IBV_QPT_UD, pages, qp_init_attr));
     std::fill_n(remote.buffer.data(), remote.buffer.size(),
                 kRemoteBufferContent);
+    // Execute Tests in Loopback mode
     RETURN_IF_ERROR(ibv_.ModifyUdQpResetToRts(local.qp, kQKey));
     RETURN_IF_ERROR(ibv_.ModifyUdQpResetToRts(remote.qp, kQKey));
+
+    // Execute Tests in Peer To Peer mode, to update local/remote gid
+    // and qp_num with the peer host/device information
+    if (verbs_util::peer_mode()) {
+      local_host.psn = lrand48() & 0xffffff;
+      if (verbs_util::is_client()) {
+        local_host.gid = local.port_attr.gid;
+        local_host.lid = local.port_attr.attr.lid;
+        local_host.qpn = local.qp->qp_num;
+        rc = verbs_util::RunClient(local_host, remote_host);
+        if (rc) {
+          LOG(FATAL) << "Failed to get remote conn attributes, Err:" << rc;
+        }
+        remote.port_attr.gid = remote_host.gid;
+        remote.qp->qp_num = remote_host.qpn;
+      } else {
+        local_host.gid = remote.port_attr.gid;
+        local_host.lid = remote.port_attr.attr.lid;
+        local_host.qpn = remote.qp->qp_num;
+        rc = verbs_util::RunServer(local_host, remote_host);
+        if (rc) {
+          LOG(FATAL) << "Failed to get remote conn attributes, Err:" << rc;
+        }
+        local.port_attr.gid = remote_host.gid;
+        local.qp->qp_num = remote_host.qpn;
+      }
+    }
+
     return std::make_pair(local, remote);
   }
 

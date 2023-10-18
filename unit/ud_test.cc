@@ -1415,5 +1415,153 @@ TEST_F(AdvancedLoopbackTest, UdSendToRc) {
   EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote_cq));
 }
 
+class UdQpRecoverTest
+    : public LoopbackUdQpTest,
+      public testing::WithParamInterface<verbs_util::IbvOperations> {
+  protected:
+   int ErrUdQp(ibv_qp* qp) const {
+     // Modify QP State to ERR state
+     ibv_qp_attr attr;
+     attr.qp_state = IBV_QPS_ERR;
+     ibv_qp_attr_mask attr_mask = IBV_QP_STATE;
+     return ibv_modify_qp(qp, &attr, attr_mask);
+   }
+
+   void MoveQpErrorState(Client &local, Client &remote) {
+     // Moves UD QP pair to error state.
+     constexpr int kPayloadLength = 1000;
+     ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+     rsge.length = kPayloadLength + sizeof(ibv_grh);
+     rsge.lkey = (rsge.lkey + 10) * 5;
+     ibv_recv_wr recv =
+           verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+     verbs_util::PostRecv(remote.qp, recv);
+     ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+     lsge.length = kPayloadLength;
+     ibv_send_wr send =
+         verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+     ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
+                                local.port_attr.gid_index,
+                                remote.port_attr.gid);
+     ASSERT_THAT(ah, NotNull());
+     send.wr.ud.ah = ah;
+     send.wr.ud.remote_qpn = remote.qp->qp_num;
+     send.wr.ud.remote_qkey = kQKey;
+     verbs_util::PostSend(local.qp, send);
+     ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                          verbs_util::WaitForCompletion(local.cq));
+     EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+     EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+     EXPECT_EQ(completion.wr_id, 1);
+     ASSERT_OK_AND_ASSIGN(completion,
+                          verbs_util::WaitForCompletion(remote.cq));
+     EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+     EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+     EXPECT_EQ(completion.wr_id, 0);
+     EXPECT_EQ(ErrUdQp(local.qp), 0);
+     // Ensure both QPs have moved to error state
+     EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
+     EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+   }
+   void RecoverQpErrorState(Client &local, Client &remote) {
+     // Recovers UD QP pair from Error state and moves it to RTS state.
+     ibv_qp_attr attr;
+     attr.qp_state = IBV_QPS_RESET;
+     ibv_qp_attr_mask attr_mask = IBV_QP_STATE;
+     ASSERT_EQ(ibv_modify_qp(local.qp, &attr, attr_mask), 0);
+     ASSERT_EQ(ibv_modify_qp(remote.qp, &attr, attr_mask), 0);
+     ASSERT_OK(ibv_.ModifyUdQpResetToRts(local.qp, kQKey));
+     ASSERT_OK(ibv_.ModifyUdQpResetToRts(remote.qp, kQKey));
+     ASSERT_EQ(verbs_util::GetQpState(local.qp),  IBV_QPS_RTS);
+     ASSERT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_RTS);
+   }
+};
+
+TEST_P(UdQpRecoverTest, UdQpRecoverTests) {
+  int kPayloadLength = 1000;  // Sub-MTU length for UD.
+  constexpr int kGrhHeaderBytes = sizeof(ibv_grh);
+  const uint32_t kImm = 0xBADDCAFE;
+  // data_src is to store the address of inline data
+  std::unique_ptr<std::vector<uint8_t>> data_src;
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateUdClientsPair());
+  // Move QPs to error state.
+  MoveQpErrorState(local, remote);
+  // Recover QPs from error state
+  RecoverQpErrorState(local, remote);
+  verbs_util::IbvOperations operation = GetParam();
+  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+  rsge.length = kPayloadLength + kGrhHeaderBytes;
+  ibv_recv_wr recv =
+      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+  verbs_util::PostRecv(remote.qp, recv);
+  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+  if (operation == verbs_util::IbvOperations::SendInline) {
+    kPayloadLength = verbs_util::GetQpCap(local.qp).max_inline_data;
+  }
+  lsge.length = kPayloadLength;
+  ibv_send_wr send;
+  switch (operation) {
+    case verbs_util::IbvOperations::Send:
+      send = verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+      break;
+    case verbs_util::IbvOperations::SendInline:
+      // A vector which is not registered to pd or mr
+      data_src = std::make_unique<std::vector<uint8_t>>(kPayloadLength);
+      // Modify lsge to send Inline data with addr of the vector
+      std::fill(data_src->begin(), data_src->end(), 'a');
+      lsge.addr = reinterpret_cast<uint64_t>(data_src->data());
+      lsge.lkey = 0xDEADBEEF;  // random bad keys
+      send = verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+      send.send_flags |= IBV_SEND_INLINE;
+      break;
+    case verbs_util::IbvOperations::SendWithImm:
+      send = verbs_util::CreateSendWithImmWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+      send.imm_data = kImm;
+      break;
+  }
+  ibv_ah* ah = ibv_.CreateAh(local.pd, local.port_attr.port,
+                             local.port_attr.gid_index, remote.port_attr.gid);
+  ASSERT_THAT(ah, NotNull());
+  send.wr.ud.ah = ah;
+  send.wr.ud.remote_qpn = remote.qp->qp_num;
+  send.wr.ud.remote_qkey = kQKey;
+  verbs_util::PostSend(local.qp, send);
+  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                       verbs_util::WaitForCompletion(local.cq));
+  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+  EXPECT_EQ(completion.wr_id, 1);
+  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
+  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+  EXPECT_EQ(completion.opcode, IBV_WC_RECV);
+  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+  EXPECT_EQ(completion.wr_id, 0);
+  EXPECT_EQ(completion.byte_len, (kGrhHeaderBytes + kPayloadLength));
+  absl::Span<uint8_t> recv_payload =
+      remote.buffer.subspan(sizeof(ibv_grh), kPayloadLength);
+  EXPECT_THAT(recv_payload, Each(kLocalBufferContent));
+  if (operation == verbs_util::IbvOperations::SendWithImm) {
+    EXPECT_NE(completion.wc_flags & IBV_WC_WITH_IMM, 0);
+    EXPECT_EQ(kImm, completion.imm_data);
+  }
+}
+INSTANTIATE_TEST_SUITE_P(
+    UdQpRecoverTest, UdQpRecoverTest,
+    testing::Values(verbs_util::IbvOperations::Send,
+                    verbs_util::IbvOperations::SendWithImm,
+                    verbs_util::IbvOperations::SendInline),
+    [](const testing::TestParamInfo<UdQpRecoverTest::ParamType>& info) {
+    std::string name = [info]() {
+      switch (info.param) {
+        case verbs_util::IbvOperations::Send: return "Send";
+        case verbs_util::IbvOperations::SendInline: return "SendInline";
+        case verbs_util::IbvOperations::SendWithImm: return "SendWithImm";
+        default: return "Unknown";
+      }
+    }();
+      return name;
+    });
 }  // namespace
 }  // namespace rdma_unit_test

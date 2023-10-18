@@ -61,7 +61,6 @@ class LoopbackRcQpTest : public LoopbackFixture {
   static constexpr char kRemoteBufferContent = 'b';
   static constexpr int kLargePayloadPages = 128;
   static constexpr int kPages = 1;
-  enum class RnrOperations { Send, SendWithImm, SendInline, WriteWithImm };
 
   void SetUp() override {
     LoopbackFixture::SetUp();
@@ -2909,10 +2908,10 @@ TEST_F(LoopbackRcQpTest, FlushErrorPollTogether) {
 
 class RnrRecoverTest
     : public LoopbackRcQpTest,
-      public testing::WithParamInterface<LoopbackRcQpTest::RnrOperations> {};
+      public testing::WithParamInterface<verbs_util::IbvOperations> {};
 
 TEST_P(RnrRecoverTest, RnrRecoverTests) {
-  LoopbackRcQpTest::RnrOperations operation = GetParam();
+  verbs_util::IbvOperations operation = GetParam();
 
   uint32_t valid_inline_size, invalid_inline_size;
   ASSERT_OK_AND_ASSIGN(std::tie(valid_inline_size, invalid_inline_size),
@@ -2930,7 +2929,7 @@ TEST_P(RnrRecoverTest, RnrRecoverTests) {
   ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
   ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
 
-  if (operation == RnrOperations::SendInline) {
+  if (operation == verbs_util::IbvOperations::SendInline) {
     // a vector which is not registered to pd or mr
     auto data_src = std::make_unique<std::vector<uint8_t>>(valid_inline_size);
     std::fill(data_src->begin(), data_src->end(), 'c');
@@ -2947,7 +2946,7 @@ TEST_P(RnrRecoverTest, RnrRecoverTests) {
       verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
 
   switch (operation) {
-    case RnrOperations::WriteWithImm:
+    case verbs_util::IbvOperations::WriteWithImm:
       lwqe = verbs_util::CreateWriteWr(/*wr_id=*/1, &lsge, /*num_sge=*/1,
                                        remote.buffer.data(),remote.mr->rkey);
       lwqe.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
@@ -2956,11 +2955,11 @@ TEST_P(RnrRecoverTest, RnrRecoverTests) {
       rwqe = verbs_util::CreateRecvWr(/*wr_id=*/0, nullptr, /*num_sge=*/0);
       break;
 
-    case RnrOperations::SendInline:
+    case verbs_util::IbvOperations::SendInline:
       lwqe.send_flags |= IBV_SEND_INLINE;
       break;
 
-    case RnrOperations::SendWithImm:
+    case verbs_util::IbvOperations::SendWithImm:
       lwqe.opcode = IBV_WR_SEND_WITH_IMM;
       lwqe.imm_data = kImm;
       break;
@@ -2995,8 +2994,8 @@ TEST_P(RnrRecoverTest, RnrRecoverTests) {
       EXPECT_EQ(lcompletion->qp_num, local.qp->qp_num);
       EXPECT_EQ(rcompletion->qp_num, remote.qp->qp_num);
 
-      if (operation == RnrOperations::SendWithImm ||
-          operation == RnrOperations::WriteWithImm) {
+      if (operation == verbs_util::IbvOperations::SendWithImm ||
+          operation == verbs_util::IbvOperations::WriteWithImm) {
         EXPECT_NE(rcompletion->wc_flags & IBV_WC_WITH_IMM, 0);
         EXPECT_EQ(kImm, rcompletion->imm_data);
       }
@@ -3012,20 +3011,20 @@ TEST_P(RnrRecoverTest, RnrRecoverTests) {
 
 INSTANTIATE_TEST_SUITE_P(
     RnrRecoverTest, RnrRecoverTest,
-    testing::Values(LoopbackRcQpTest::RnrOperations::Send,
-                    LoopbackRcQpTest::RnrOperations::SendWithImm,
-                    LoopbackRcQpTest::RnrOperations::SendInline,
-                    LoopbackRcQpTest::RnrOperations::WriteWithImm),
+    testing::Values(verbs_util::IbvOperations::Send,
+                    verbs_util::IbvOperations::SendWithImm,
+                    verbs_util::IbvOperations::SendInline,
+                    verbs_util::IbvOperations::WriteWithImm),
     [](const testing::TestParamInfo<RnrRecoverTest::ParamType>& info) {
     std::string name = [info]() {
       switch (info.param) {
-        case LoopbackRcQpTest::RnrOperations::Send:
+        case verbs_util::IbvOperations::Send:
           return "Send";
-        case LoopbackRcQpTest::RnrOperations::SendInline:
+        case verbs_util::IbvOperations::SendInline:
           return "SendInline";
-        case LoopbackRcQpTest::RnrOperations::SendWithImm:
+        case verbs_util::IbvOperations::SendWithImm:
           return "SendWithImm";
-        case LoopbackRcQpTest::RnrOperations::WriteWithImm:
+        case verbs_util::IbvOperations::WriteWithImm:
           return "WriteWithImm";
         default:
           return "Unknown";
@@ -3034,5 +3033,190 @@ INSTANTIATE_TEST_SUITE_P(
       return name;
     });
 
+
+class RcQpRecoverTest
+    : public LoopbackRcQpTest,
+      public testing::WithParamInterface<verbs_util::IbvOperations> {
+  protected:
+   static constexpr uint32_t kImm = 0xBADDCAFE;
+   void MoveQpErrorState(Client &local, Client &remote) {
+     // Moves RC QP pair to error state.
+     ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+     ibv_send_wr read = verbs_util::CreateReadWr(
+         /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data()-32,
+	 remote.mr->rkey);
+     verbs_util::PostSend(local.qp, read);
+     ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                          verbs_util::WaitForCompletion(local.cq));
+     EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
+     EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+     EXPECT_EQ(completion.wr_id, 1);
+     EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+     // Ensure both QPs have moved to error state
+     ASSERT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+     ASSERT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
+   }
+
+   void RecoverQpErrorState(Client &local, Client &remote) {
+     // Recovers RC QP pair from Error state and moves it to RTS state.
+     ibv_qp_attr attr;
+     attr.qp_state = IBV_QPS_RESET;
+     ibv_qp_attr_mask attr_mask = IBV_QP_STATE;
+     ASSERT_EQ(ibv_modify_qp(local.qp, &attr, attr_mask), 0);
+     ASSERT_EQ(ibv_modify_qp(remote.qp, &attr, attr_mask), 0);
+     QpInitAttribute qp_init_attr = QpInitAttribute();
+     QpAttribute qp_attr = QpAttribute();
+     ASSERT_OK(ibv_.ModifyRcQpResetToRts(local.qp, local.port_attr,
+                                         remote.port_attr.gid,
+                                         remote.qp->qp_num, qp_attr));
+     ASSERT_OK(ibv_.ModifyRcQpResetToRts(remote.qp, remote.port_attr,
+                                         local.port_attr.gid,
+                                         local.qp->qp_num, qp_attr));
+     ASSERT_EQ(verbs_util::GetQpState(local.qp),  IBV_QPS_RTS);
+     ASSERT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_RTS);
+   }
+
+   void ValidateLocalCompletion(Client &local, verbs_util::IbvOperations operation) {
+     ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                          verbs_util::WaitForCompletion(local.cq));
+     EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+     if (operation == verbs_util::IbvOperations::Send ||
+	 operation == verbs_util::IbvOperations::SendInline ||
+	 operation == verbs_util::IbvOperations::SendWithImm) {
+       EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+     } else {
+       EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
+     }
+     EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+     EXPECT_EQ(completion.wr_id, 1);
+   }
+
+   void ValidateRemoteCompletion(Client &remote, verbs_util::IbvOperations operation) {
+     ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+		          verbs_util::WaitForCompletion(remote.cq));
+     EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+     EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+     EXPECT_EQ(completion.wr_id, 0);
+     if (operation == verbs_util::IbvOperations::SendWithImm ||
+         operation == verbs_util::IbvOperations::WriteWithImm) {
+       EXPECT_NE(completion.wc_flags & IBV_WC_WITH_IMM, 0);
+       EXPECT_EQ(kImm, completion.imm_data);
+     } else if (operation == verbs_util::IbvOperations::Send) {
+       EXPECT_EQ(completion.wc_flags, 0);
+     }
+   }
+};
+
+TEST_P(RcQpRecoverTest, RcQpRecoverTests) {
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
+  const size_t inline_size = verbs_util::GetQpCap(local.qp).max_inline_data;
+  MoveQpErrorState(local, remote);
+  //Recover QPs from error state
+  RecoverQpErrorState(local, remote);
+  verbs_util::IbvOperations operation = GetParam();
+  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+  // A vector which is not registered to pd or mr
+  auto data_src = std::make_unique<std::vector<uint8_t>>(inline_size);
+  if (operation == verbs_util::IbvOperations::SendInline ||
+      operation == verbs_util::IbvOperations::WriteInline) {
+    std::fill(data_src->begin(), data_src->end(), 'c');
+    // Modify lsge to send Inline data with addr of the vector
+    lsge.addr = reinterpret_cast<uint64_t>(data_src->data());
+    lsge.length = inline_size;
+    lsge.lkey = 0xDEADBEEF;  // random bad keys
+  }
+  if (operation != verbs_util::IbvOperations::Write &&
+      operation != verbs_util::IbvOperations::WriteInline) {
+    ibv_recv_wr recv = verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge,
+		                                /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  ibv_send_wr wr;
+  switch (operation) {
+    case verbs_util::IbvOperations::Send:
+    case verbs_util::IbvOperations::SendInline:
+    case verbs_util::IbvOperations::SendWithImm:
+      if (operation == verbs_util::IbvOperations::SendWithImm) {
+        wr = verbs_util::CreateSendWithImmWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+        wr.imm_data = kImm;
+      } else {
+        wr = verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+        if (operation == verbs_util::IbvOperations::SendInline) {
+          wr.send_flags |= IBV_SEND_INLINE;
+	}
+      }
+      verbs_util::PostSend(local.qp, wr);
+      ValidateLocalCompletion(local, operation);
+      ValidateRemoteCompletion(remote, operation);
+      if (operation == verbs_util::IbvOperations::SendInline) {
+        EXPECT_THAT(absl::MakeSpan(remote.buffer.data(), inline_size), Each('c'));
+        EXPECT_THAT(absl::MakeSpan(remote.buffer.data() + inline_size,
+                                   remote.buffer.data() + remote.buffer.size()),
+                                   Each(kRemoteBufferContent));
+      } else {
+        EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+      }
+      break;
+    case verbs_util::IbvOperations::Write:
+    case verbs_util::IbvOperations::WriteInline:
+    case verbs_util::IbvOperations::WriteWithImm:
+      if (operation == verbs_util::IbvOperations::WriteWithImm) {
+        wr = verbs_util::CreateWriteWithImmWr(/*wr_id=*/1, &lsge, /*num_sge=*/1,
+                                              remote.buffer.data(),
+                                              remote.mr->rkey);
+	wr.imm_data = kImm;
+      } else {
+        wr = verbs_util::CreateWriteWr(/*wr_id=*/1, &lsge, /*num_sge=*/1,
+                                       remote.buffer.data(), remote.mr->rkey);
+	if (operation == verbs_util::IbvOperations::WriteInline) {
+          wr.send_flags |= IBV_SEND_INLINE;
+        }
+      }
+      verbs_util::PostSend(local.qp, wr);
+      ValidateLocalCompletion(local, operation);
+      if (operation == verbs_util::IbvOperations::WriteWithImm) {
+        ValidateRemoteCompletion(remote, operation);
+      }
+      if (operation == verbs_util::IbvOperations::WriteInline) {
+        EXPECT_THAT(absl::MakeSpan(remote.buffer.data(), inline_size), Each('c'));
+        EXPECT_THAT(absl::MakeSpan(remote.buffer.data() + inline_size,
+                                   remote.buffer.data() + remote.buffer.size()),
+                                   Each(kRemoteBufferContent));
+      } else {
+        EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+      }
+  }
+}
+INSTANTIATE_TEST_SUITE_P(
+    RcQpRecoverTest, RcQpRecoverTest,
+    testing::Values(verbs_util::IbvOperations::Send,
+                    verbs_util::IbvOperations::SendWithImm,
+                    verbs_util::IbvOperations::SendInline,
+                    verbs_util::IbvOperations::Write,
+                    verbs_util::IbvOperations::WriteInline,
+                    verbs_util::IbvOperations::WriteWithImm),
+    [](const testing::TestParamInfo<RcQpRecoverTest::ParamType>& info) {
+      std::string name = [info]() {
+        switch (info.param) {
+          case verbs_util::IbvOperations::Send:
+	    return "Send";
+          case verbs_util::IbvOperations::SendInline:
+	    return "SendInline";
+          case verbs_util::IbvOperations::SendWithImm:
+	    return "SendWithImm";
+          case verbs_util::IbvOperations::Write:
+	    return "Write";
+          case verbs_util::IbvOperations::WriteInline:
+	    return "WriteInline";
+          case verbs_util::IbvOperations::WriteWithImm:
+	    return "WriteWithImm";
+          default:
+	    return "Unknown";
+	}
+      }();
+    return name;
+    });
 }  // namespace
 }  // namespace rdma_unit_test

@@ -275,7 +275,8 @@ ibv_recv_wr CreateRecvWr(uint64_t wr_id, ibv_sge* sge, int num_sge) {
 
 ibv_send_wr CreateRdmaWr(ibv_wr_opcode opcode, uint64_t wr_id, ibv_sge* sge,
                          int num_sge, void* remote_addr, uint32_t rkey) {
-  DCHECK(opcode == IBV_WR_RDMA_READ || opcode == IBV_WR_RDMA_WRITE)
+  DCHECK(opcode == IBV_WR_RDMA_READ || opcode == IBV_WR_RDMA_WRITE ||
+	 opcode == IBV_WR_RDMA_WRITE_WITH_IMM)
       << "Opcode " << static_cast<int>(opcode) << "is not RDMA.";
   return ibv_send_wr{
       .wr_id = wr_id,
@@ -297,6 +298,12 @@ ibv_send_wr CreateReadWr(uint64_t wr_id, ibv_sge* sge, int num_sge,
 ibv_send_wr CreateWriteWr(uint64_t wr_id, ibv_sge* sge, int num_sge,
                           void* remote_buffer, uint32_t rkey) {
   return CreateRdmaWr(IBV_WR_RDMA_WRITE, wr_id, sge, num_sge, remote_buffer,
+                      rkey);
+}
+
+ibv_send_wr CreateWriteWithImmWr(uint64_t wr_id, ibv_sge* sge, int num_sge,
+                                 void* remote_buffer, uint32_t rkey) {
+  return CreateRdmaWr(IBV_WR_RDMA_WRITE_WITH_IMM, wr_id, sge, num_sge, remote_buffer,
                       rkey);
 }
 

@@ -60,6 +60,14 @@ struct conn_attr {
   uint32_t psn;
   union ibv_gid gid;
 };
+enum class IbvOperations {
+  Send,
+  SendWithImm,
+  SendInline,
+  Write,
+  WriteWithImm,
+  WriteInline
+};
 
 #define RESET_TO_INIT_MASK \
   (IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS)
@@ -160,6 +168,9 @@ ibv_send_wr CreateReadWr(uint64_t wr_id, ibv_sge* sge, int num_sge,
 ibv_send_wr CreateWriteWr(uint64_t wr_id, ibv_sge* sge, int num_sge,
                           void* remote_buffer, uint32_t rkey);
 
+// Creates a WR for Write with immediate.
+ibv_send_wr CreateWriteWithImmWr(uint64_t wr_id, ibv_sge* sge, int num_sge,
+                                 void* remote_buffer, uint32_t rkey);
 // Create an Atomic work request.
 ibv_send_wr CreateAtomicWr(ibv_wr_opcode opcode, uint64_t wr_id, ibv_sge* sge,
                            int num_sge, void* remote_buffer, uint32_t rkey,

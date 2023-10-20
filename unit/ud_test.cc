@@ -1067,6 +1067,10 @@ TEST_F(LoopbackUdQpTest, SendRecvBatchedWr) {
     EXPECT_EQ(send_completions, batch_size);
   }
   if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    // Wait for few seconds
+    if (verbs_util::peer_mode()) {
+      absl::SleepFor(absl::Seconds(2));
+    }
     uint32_t recv_completions = 0;
     for (uint32_t i = 0; i < batch_size; ++i) {
       ASSERT_OK_AND_ASSIGN(ibv_wc completion,

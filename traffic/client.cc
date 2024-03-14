@@ -77,6 +77,7 @@ ABSL_FLAG(
     " well-working non-faulty test, we expect consecutive completions to arrive"
     " much less than this timeout apart.");
 
+using namespace google;
 namespace rdma_unit_test {
 namespace {
 
@@ -828,7 +829,7 @@ int Client::TryPollCompletions(int count, ibv_cq* cq) {
     }
   }
   total_completions_ += num_completed;
-  LOG_EVERY_N_SEC(INFO, 1) << "Client " << client_id() << ": Received "
+  LOG_EVERY_N(INFO, 1) << "Client " << client_id() << ": Received "
                            << total_completions_ << " completions.";
   return num_completed;
 }

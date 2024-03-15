@@ -20,6 +20,7 @@
 #include "gtest/gtest.h"
 #include "absl/debugging/failure_signal_handler.h"
 #include "absl/flags/parse.h"
+#include "internal/introspection_ionic.h"
 #include "internal/introspection_irdma.h"
 #include "internal/introspection_mlx4.h"
 #include "internal/introspection_mlx5.h"
@@ -37,6 +38,7 @@ int main(int argc, char* argv[]) {
 
   // Register supported NIC's
   rdma_unit_test::IntrospectionIrdma::Register();
+  rdma_unit_test::IntrospectionIonic::Register();
   rdma_unit_test::IntrospectionMlx4::Register();
   rdma_unit_test::IntrospectionMlx5::Register();
   rdma_unit_test::IntrospectionRxe::Register();

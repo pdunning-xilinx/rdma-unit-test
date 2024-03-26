@@ -21,8 +21,10 @@
 #include <sys/socket.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -41,6 +43,8 @@
 #include "infiniband/verbs.h"
 #include "public/flags.h"
 #include "public/status_matchers.h"
+
+using namespace std::chrono_literals;
 
 namespace rdma_unit_test {
 namespace verbs_util {
@@ -575,10 +579,23 @@ int RunClient(const struct conn_attr& local_host,
     goto out;
   }
 
-  rc = connect(client_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
-  if (rc) {
-    LOG(ERROR) << "Client: Connect failed, rc:" << rc;
-    goto out;
+  {
+    int connect_iterations = 100;
+    auto connect_sleep = 100ms;
+    for (int i = 0; i < connect_iterations; i++) {
+      rc = connect(client_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
+      if (rc) {
+        if (i == connect_iterations - 1) {
+          LOG(ERROR) << "Client: Connect failed, rc:" << rc
+                     << " errno:" << strerror(errno);
+          goto out;
+        } else {
+          std::this_thread::sleep_for(connect_sleep);
+        }
+      } else {
+        break;
+      }
+    }
   }
 
   // preparing message to send local conn attributes

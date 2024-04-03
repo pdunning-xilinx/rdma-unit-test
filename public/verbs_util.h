@@ -22,6 +22,7 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <zmq.hpp>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -212,10 +213,14 @@ int connect_peer(struct ibv_qp* qp, int local_psn,
                  struct conn_attr& remote_host, uint8_t port, int sgid_index);
 
 // Create TCP Server socket to exchange QP information
+void RunPeerServer(const struct conn_attr& local_host,
+                   struct conn_attr& remote_host, zmq::socket_t& socket);
 int RunServer(const struct conn_attr& local_host,
               struct conn_attr& remote_host);
 
 // Create TCP Client socket to exchange QP information
+void RunPeerClient(const struct conn_attr& local_host,
+                   struct conn_attr& remote_host, zmq::socket_t& socket);
 int RunClient(const struct conn_attr& local_host,
               struct conn_attr& remote_host);
 

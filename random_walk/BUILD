@@ -38,6 +38,7 @@ cc_test(
         "@com_google_absl//absl/time",
         "@com_google_protobuf//:protobuf",
         "@libibverbs",
+        "@libzmq",
     ],
 )
 
@@ -58,6 +59,7 @@ cc_library(
         "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest",
         "@com_google_protobuf//:protobuf",
+        "@libzmq",
     ],
     alwayslink = 1,
 )
@@ -81,6 +83,7 @@ cc_binary(
         "@com_google_absl//absl/flags:parse",
         "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest",
+        "@libzmq",
     ],
 )
 

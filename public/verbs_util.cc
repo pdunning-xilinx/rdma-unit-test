@@ -28,6 +28,8 @@
 #include <utility>
 #include <vector>
 
+#include <zmq.hpp>
+
 #include "glog/logging.h"
 #include "gtest/gtest.h"
 #include "absl/cleanup/cleanup.h"
@@ -471,6 +473,30 @@ static void gid_to_wire_gid(const union ibv_gid* gid, char wgid[]) {
   for (i = 0; i < 4; ++i) sprintf(&wgid[i * 8], "%08x", htobe32(tmp_gid[i]));
 }
 
+void RunPeerServer(const struct conn_attr& local_host,
+                   struct conn_attr& remote_host, zmq::socket_t& socket) {
+  // Message to share the connection attributes with Client
+  char msg[sizeof "0000:000000:000000:00000000000000000000000000000000"];
+  char gid[33];
+
+  zmq::message_t reply{};
+  if (socket.recv(reply, zmq::recv_flags::none) != sizeof msg) {
+    LOG(FATAL) << "Server: Couldn't read remote address";
+  }
+
+  // storing received message to remote conn attributes
+  sscanf(reply.to_string().c_str(), "%hu:%x:%x:%s", &remote_host.lid,
+         &remote_host.qpn, &remote_host.psn, gid);
+  wire_gid_to_gid(gid, &remote_host.gid);
+
+  // preparing message to send local conn attributes
+  gid_to_wire_gid(&local_host.gid, gid);
+  sprintf(msg, "%04x:%06x:%06x:%s", local_host.lid, local_host.qpn,
+          local_host.psn, gid);
+
+  socket.send(zmq::buffer(msg), zmq::send_flags::none);
+}
+
 int RunServer(const struct conn_attr& local_host,
               struct conn_attr& remote_host) {
   // Message to share the connection attributes with Client
@@ -552,6 +578,30 @@ out:
   // closing the listening socket
   shutdown(server_fd, SHUT_RDWR);
   return rc;
+}
+
+void RunPeerClient(const struct conn_attr& local_host,
+                   struct conn_attr& remote_host, zmq::socket_t& socket) {
+  // Message to share the connection attributes with Server
+  char msg[sizeof "0000:000000:000000:00000000000000000000000000000000"];
+  char gid[33];
+
+  // preparing message to send local conn attributes
+  gid_to_wire_gid(&local_host.gid, gid);
+  sprintf(msg, "%04x:%06x:%06x:%s", local_host.lid, local_host.qpn,
+          local_host.psn, gid);
+
+  socket.send(zmq::buffer(msg), zmq::send_flags::none);
+
+  zmq::message_t reply{};
+  if (socket.recv(reply, zmq::recv_flags::none) != sizeof msg) {
+    LOG(FATAL) << "Couldn't read remote address";
+  }
+
+  // storing received message to remote conn attributes
+  sscanf(reply.to_string().c_str(), "%hu:%x:%x:%s", &remote_host.lid,
+         &remote_host.qpn, &remote_host.psn, gid);
+  wire_gid_to_gid(gid, &remote_host.gid);
 }
 
 int RunClient(const struct conn_attr& local_host,

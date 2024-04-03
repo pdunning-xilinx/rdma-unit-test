@@ -105,3 +105,18 @@ cc_library(
 )
 """,
 )
+
+# libzmq
+new_local_repository(
+    name = "libzmq",
+    path = "/usr/lib64",
+    build_file_content = """
+cc_library(
+    name = "libzmq",
+    srcs = [
+         "libzmq.so",
+    ],
+    visibility = ["//visibility:public"],
+)
+""",
+)

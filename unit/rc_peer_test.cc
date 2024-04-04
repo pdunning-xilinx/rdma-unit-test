@@ -94,6 +94,31 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
   }
 
  protected:
+  void synchronise() {
+    if (!verbs_util::peer_mode()) {
+      return;
+    }
+    static int sync_count = 0;
+    std::string msg = "sync" + std::to_string(sync_count);
+    zmq::message_t reply{};
+    if (verbs_util::is_client()) {
+      comm_socket.send(zmq::buffer(msg), zmq::send_flags::none);
+      if (!comm_socket.recv(reply, zmq::recv_flags::none) ||
+          (reply.to_string() != msg)) {
+        LOG(FATAL) << "Wrong Sync message received '" << reply.to_string()
+                   << "' expected '" << msg << "'";
+      }
+    } else {
+      if (!comm_socket.recv(reply, zmq::recv_flags::none) ||
+          (reply.to_string() != msg)) {
+        LOG(FATAL) << "Wrong Sync message received '" << reply.to_string()
+                   << "' expected '" << msg << "'";
+      }
+      comm_socket.send(zmq::buffer(msg), zmq::send_flags::none);
+    }
+    sync_count++;
+  }
+
   absl::StatusOr<std::pair<Client, Client>> CreateConnectedClientsPair(
       int pages = kPages, QpInitAttribute qp_init_attr = QpInitAttribute(),
       QpAttribute qp_attr = QpAttribute()) {
@@ -119,6 +144,7 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
       return std::make_pair(local, remote);
     }
 
+    synchronise();
     // Execute Tests in Peer To Peer mode
     local_host.psn = lrand48() & 0xffffff;
     if (verbs_util::is_client()) {
@@ -174,12 +200,14 @@ TEST_F(Peer2PeerRcQpTest, Send) {
         verbs_util::CreateRecvWr(/*wr_id=*/0, &sge, /*num_sge=*/1);
     verbs_util::PostRecv(remote.qp, recv);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
     ibv_send_wr send =
         verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
     verbs_util::PostSend(local.qp, send);
   }
+  synchronise();
 
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     ASSERT_OK_AND_ASSIGN(ibv_wc completion,
@@ -189,6 +217,7 @@ TEST_F(Peer2PeerRcQpTest, Send) {
     EXPECT_EQ(completion.qp_num, local.qp->qp_num);
     EXPECT_EQ(completion.wr_id, 1);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_server()) {
     ASSERT_OK_AND_ASSIGN(ibv_wc completion,
                          verbs_util::WaitForCompletion(remote.cq));
@@ -200,6 +229,7 @@ TEST_F(Peer2PeerRcQpTest, Send) {
     EXPECT_EQ(completion.wc_flags, 0);
     EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
   }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, SendEmptySgl) {
@@ -214,11 +244,13 @@ TEST_F(Peer2PeerRcQpTest, SendEmptySgl) {
         verbs_util::CreateRecvWr(/*wr_id=*/0, nullptr, /*num_sge=*/0);
     verbs_util::PostRecv(remote.qp, recv);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     ibv_send_wr send =
         verbs_util::CreateSendWr(/*wr_id=*/1, nullptr, /*num_sge=*/0);
     verbs_util::PostSend(local.qp, send);
   }
+  synchronise();
 
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     ASSERT_OK_AND_ASSIGN(ibv_wc completion,
@@ -228,6 +260,7 @@ TEST_F(Peer2PeerRcQpTest, SendEmptySgl) {
     EXPECT_EQ(completion.qp_num, local.qp->qp_num);
     EXPECT_EQ(completion.wr_id, 1);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_server()) {
     ASSERT_OK_AND_ASSIGN(ibv_wc completion,
                          verbs_util::WaitForCompletion(remote.cq));
@@ -238,6 +271,7 @@ TEST_F(Peer2PeerRcQpTest, SendEmptySgl) {
     EXPECT_EQ(completion.wr_id, 0);
     EXPECT_EQ(completion.wc_flags, 0);
   }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, UnsignaledSend) {
@@ -250,6 +284,7 @@ TEST_F(Peer2PeerRcQpTest, UnsignaledSend) {
         verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
     verbs_util::PostRecv(remote.qp, recv);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
     ibv_send_wr send =
@@ -257,6 +292,7 @@ TEST_F(Peer2PeerRcQpTest, UnsignaledSend) {
     send.send_flags = send.send_flags & ~IBV_SEND_SIGNALED;
     verbs_util::PostSend(local.qp, send);
   }
+  synchronise();
 
   if (!verbs_util::peer_mode() || verbs_util::is_server()) {
     ASSERT_OK_AND_ASSIGN(ibv_wc completion,
@@ -269,10 +305,12 @@ TEST_F(Peer2PeerRcQpTest, UnsignaledSend) {
     EXPECT_EQ(completion.wc_flags, 0);
     EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     ibv_wc completion;
     EXPECT_EQ(ibv_poll_cq(local.cq, 1, &completion), 0);
   }
+  synchronise();
 }
 
 // Send a 64MB chunk from local to remote
@@ -453,6 +491,7 @@ TEST_F(Peer2PeerRcQpTest, SendImmData) {
         verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
     verbs_util::PostRecv(remote.qp, recv);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
     ibv_send_wr send =
@@ -461,6 +500,7 @@ TEST_F(Peer2PeerRcQpTest, SendImmData) {
     send.imm_data = kImm;
     verbs_util::PostSend(local.qp, send);
   }
+  synchronise();
 
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     ASSERT_OK_AND_ASSIGN(ibv_wc completion,
@@ -470,6 +510,7 @@ TEST_F(Peer2PeerRcQpTest, SendImmData) {
     EXPECT_EQ(completion.qp_num, local.qp->qp_num);
     EXPECT_EQ(completion.wr_id, 1);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_server()) {
     ASSERT_OK_AND_ASSIGN(ibv_wc completion,
                          verbs_util::WaitForCompletion(remote.cq));
@@ -483,6 +524,7 @@ TEST_F(Peer2PeerRcQpTest, SendImmData) {
 
     EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
   }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, SendRecvOnlyImmData) {
@@ -497,6 +539,7 @@ TEST_F(Peer2PeerRcQpTest, SendRecvOnlyImmData) {
     recv = verbs_util::CreateRecvWr(/*wr_id=*/0, nullptr, /*num_sge=*/0);
     verbs_util::PostRecv(remote.qp, recv);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     send = verbs_util::CreateSendWr(/*wr_id=*/1, nullptr, /*num_sge=*/0);
     send.opcode = IBV_WR_SEND_WITH_IMM;
@@ -510,6 +553,7 @@ TEST_F(Peer2PeerRcQpTest, SendRecvOnlyImmData) {
     EXPECT_EQ(completion.qp_num, local.qp->qp_num);
     EXPECT_EQ(completion.wr_id, 1);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_server()) {
     ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
     EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
@@ -519,12 +563,14 @@ TEST_F(Peer2PeerRcQpTest, SendRecvOnlyImmData) {
     EXPECT_NE(completion.wc_flags & IBV_WC_WITH_IMM, 0);
     EXPECT_EQ(kImm, completion.imm_data);
   }
+  synchronise();
 
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     /* Modify the immediate value and send back */
     recv = verbs_util::CreateRecvWr(/*wr_id=*/0, nullptr, /*num_sge=*/0);
     verbs_util::PostRecv(local.qp, recv);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_server()) {
     send = verbs_util::CreateSendWr(/*wr_id=*/1, nullptr, /*num_sge=*/0);
     send.opcode = IBV_WR_SEND_WITH_IMM;
@@ -537,6 +583,7 @@ TEST_F(Peer2PeerRcQpTest, SendRecvOnlyImmData) {
     EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
     EXPECT_EQ(completion.wr_id, 1);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(local.cq));
     EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
@@ -546,6 +593,7 @@ TEST_F(Peer2PeerRcQpTest, SendRecvOnlyImmData) {
     EXPECT_NE(completion.wc_flags & IBV_WC_WITH_IMM, 0);
     EXPECT_EQ(kImm * 2, completion.imm_data);
   }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, SendWithInvalidate) {
@@ -885,6 +933,7 @@ TEST_F(Peer2PeerRcQpTest, BadSendAddr) {
         verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
     verbs_util::PostRecv(remote.qp, recv);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
     --sge.addr;
@@ -900,9 +949,11 @@ TEST_F(Peer2PeerRcQpTest, BadSendAddr) {
     /* Ensure local Qp has moved to error state */
     EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_server()) {
     EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
   }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, BadRecvAddr) {
@@ -994,6 +1045,7 @@ TEST_F(Peer2PeerRcQpTest, SendBufferExceedMr) {
         verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
     verbs_util::PostRecv(remote.qp, recv);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
     lsge.length += 32;
@@ -1001,6 +1053,7 @@ TEST_F(Peer2PeerRcQpTest, SendBufferExceedMr) {
         verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
     verbs_util::PostSend(local.qp, send);
   }
+  synchronise();
 
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     ASSERT_OK_AND_ASSIGN(ibv_wc completion,
@@ -1012,9 +1065,11 @@ TEST_F(Peer2PeerRcQpTest, SendBufferExceedMr) {
     /* Ensure local Qp has moved to error state */
     EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_server()) {
     EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
   }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, RecvBufferExceedMr) {
@@ -2789,6 +2844,7 @@ TEST_F(Peer2PeerRcQpTest, SendRecvBatchedWr) {
     }
     verbs_util::PostSend(local.qp, send_batch[0]);
   }
+  synchronise();
 
   std::vector<ibv_sge> rsge(batch_size);
   std::vector<ibv_recv_wr> recv_batch(batch_size);
@@ -2804,6 +2860,7 @@ TEST_F(Peer2PeerRcQpTest, SendRecvBatchedWr) {
     }
     verbs_util::PostRecv(remote.qp, recv_batch[0]);
   }
+  synchronise();
 
   uint32_t send_completions = 0;
   uint32_t recv_completions = 0;
@@ -2819,6 +2876,7 @@ TEST_F(Peer2PeerRcQpTest, SendRecvBatchedWr) {
       }
     }
   }
+  synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_server()) {
     while (recv_completions < batch_size) {
       absl::StatusOr<ibv_wc> completion =
@@ -2830,6 +2888,7 @@ TEST_F(Peer2PeerRcQpTest, SendRecvBatchedWr) {
       }
     }
   }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, FullSubmissionQueue) {

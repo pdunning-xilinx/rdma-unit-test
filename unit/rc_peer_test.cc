@@ -124,14 +124,19 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
       QpAttribute qp_attr = QpAttribute()) {
     struct verbs_util::conn_attr local_host, remote_host;
     int rc;
+    Client local{};
+    Client remote{};
 
-    ASSIGN_OR_RETURN(Client local,
-                     CreateClient(IBV_QPT_RC, pages, qp_init_attr));
-    std::fill_n(local.buffer.data(), local.buffer.size(), kLocalBufferContent);
-    ASSIGN_OR_RETURN(Client remote,
-                     CreateClient(IBV_QPT_RC, pages, qp_init_attr));
-    std::fill_n(remote.buffer.data(), remote.buffer.size(),
-                kRemoteBufferContent);
+    if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+      ASSIGN_OR_RETURN(local, CreateClient(IBV_QPT_RC, pages, qp_init_attr));
+      std::fill_n(local.buffer.data(), local.buffer.size(),
+                  kLocalBufferContent);
+    }
+    if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+      ASSIGN_OR_RETURN(remote, CreateClient(IBV_QPT_RC, pages, qp_init_attr));
+      std::fill_n(remote.buffer.data(), remote.buffer.size(),
+                  kRemoteBufferContent);
+    }
 
     // Execute Tests in Loopback mode
     if (!verbs_util::peer_mode()) {

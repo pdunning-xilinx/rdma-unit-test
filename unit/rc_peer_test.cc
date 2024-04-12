@@ -156,6 +156,7 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
       local_host.gid = local.port_attr.gid;
       local_host.lid = local.port_attr.attr.lid;
       local_host.qpn = local.qp->qp_num;
+      local_host.port = local.port_attr.port;
       verbs_util::RunPeerClient(local_host, remote_host, comm_socket);
       rc = connect_peer(local.qp, local_host.psn, remote_host,
                         remote.port_attr.port, remote.port_attr.gid_index);
@@ -163,6 +164,7 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
       local_host.gid = remote.port_attr.gid;
       local_host.lid = remote.port_attr.attr.lid;
       local_host.qpn = remote.qp->qp_num;
+      local_host.port = remote.port_attr.port;
       verbs_util::RunPeerServer(local_host, remote_host, comm_socket);
       rc = connect_peer(remote.qp, local_host.psn, remote_host,
                         remote.port_attr.port, remote.port_attr.gid_index);

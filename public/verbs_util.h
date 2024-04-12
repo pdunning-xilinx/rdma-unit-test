@@ -60,6 +60,7 @@ struct conn_attr {
   uint32_t qpn;
   uint32_t psn;
   union ibv_gid gid;
+  uint8_t port;
 };
 enum class IbvOperations {
   Send,

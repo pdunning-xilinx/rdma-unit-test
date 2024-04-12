@@ -73,11 +73,21 @@ class VerbsHelperSuite {
                                     const PortAttribute& local,
                                     ibv_gid remote_gid, uint32_t remote_qpn,
                                     QpAttribute qp_attr = QpAttribute());
+  absl::Status ModifyRcQpResetToRtr(ibv_qp* local_qp,
+                                    const PortAttribute& local,
+                                    ibv_gid remote_gid, uint32_t remote_qpn,
+                                    uint8_t remote_port,
+                                    QpAttribute qp_attr = QpAttribute());
 
   // Modify a RC `local_qp` from RESET state to RTS state.
   absl::Status ModifyRcQpResetToRts(ibv_qp* local_qp,
                                     const PortAttribute& local,
                                     ibv_gid remote_gid, uint32_t remote_qpn,
+                                    QpAttribute qp_attr = QpAttribute());
+  absl::Status ModifyRcQpResetToRts(ibv_qp* local_qp,
+                                    const PortAttribute& local,
+                                    ibv_gid remote_gid, uint32_t remote_qpn,
+                                    uint8_t remote_port,
                                     QpAttribute qp_attr = QpAttribute());
 
   // Modify a RC `local_qp` from RESET state to SQD state.
@@ -96,6 +106,10 @@ class VerbsHelperSuite {
   // Modify a RC `qp` from INIT to RTR state.
   int ModifyRcQpInitToRtr(ibv_qp* qp, const PortAttribute& local,
                           ibv_gid remote_gid, uint32_t remote_qpn,
+                          QpAttribute qp_attr = QpAttribute());
+  int ModifyRcQpInitToRtr(ibv_qp* qp, const PortAttribute& local,
+                          ibv_gid remote_gid, uint32_t remote_qpn,
+                          uint8_t remote_port,
                           QpAttribute qp_attr = QpAttribute());
   // Modify a RC `qp` from RTR to RTS state.
   int ModifyRcQpRtrToRts(ibv_qp* qp, QpAttribute qp_attr = QpAttribute());

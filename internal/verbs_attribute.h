@@ -93,8 +93,8 @@ class QpAttribute {
   // Return ibv_qp_attr and corresponding mask for modifying RC QP from INIT
   // state to RTR state.
   // Note: `port` is the local physical port that the packet will be sent from.
-  ibv_qp_attr GetRcInitToRtrAttr(uint8_t port, uint8_t sgid_index, ibv_gid dgid,
-                                 uint32_t dest_qp_num) const;
+  ibv_qp_attr GetRcInitToRtrAttr(uint8_t remote_port, uint8_t sgid_index,
+                                 ibv_gid dgid, uint32_t dest_qp_num) const;
   int GetRcInitToRtrMask() const;
 
   // Return ibv_qp_attr and corresponding mask for modifying RC QP from RTR

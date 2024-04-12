@@ -56,13 +56,19 @@ absl::Status VerbsHelperSuite::ModifyRcQpResetToRtr(ibv_qp* local_qp,
                                                     ibv_gid remote_gid,
                                                     uint32_t remote_qpn,
                                                     QpAttribute qp_attr) {
+  return ModifyRcQpResetToRtr(local_qp, local, remote_gid, remote_qpn,
+                              local.port, qp_attr);
+}
+absl::Status VerbsHelperSuite::ModifyRcQpResetToRtr(
+    ibv_qp* local_qp, const PortAttribute& local, ibv_gid remote_gid,
+    uint32_t remote_qpn, uint8_t remote_port, QpAttribute qp_attr) {
   int result_code = ModifyRcQpResetToInit(local_qp, local.port, qp_attr);
   if (result_code) {
     return absl::InternalError(absl::StrFormat(
         "Modified QP from RESET to INIT failed (%d).", result_code));
   }
-  result_code =
-      ModifyRcQpInitToRtr(local_qp, local, remote_gid, remote_qpn, qp_attr);
+  result_code = ModifyRcQpInitToRtr(local_qp, local, remote_gid, remote_qpn,
+                                    remote_port, qp_attr);
   if (result_code) {
     return absl::InternalError(absl::StrFormat(
         "Modified QP from INIT to RTR failed (%d).", result_code));
@@ -74,13 +80,19 @@ absl::Status VerbsHelperSuite::ModifyRcQpResetToRts(ibv_qp* local_qp,
                                                     ibv_gid remote_gid,
                                                     uint32_t remote_qpn,
                                                     QpAttribute qp_attr) {
+  return ModifyRcQpResetToRts(local_qp, local, remote_gid, remote_qpn,
+                              local.port, qp_attr);
+}
+absl::Status VerbsHelperSuite::ModifyRcQpResetToRts(
+    ibv_qp* local_qp, const PortAttribute& local, ibv_gid remote_gid,
+    uint32_t remote_qpn, uint8_t remote_port, QpAttribute qp_attr) {
   int result_code = ModifyRcQpResetToInit(local_qp, local.port, qp_attr);
   if (result_code) {
     return absl::InternalError(absl::StrFormat(
         "Modified QP from RESET to INIT failed (%d).", result_code));
   }
-  result_code =
-      ModifyRcQpInitToRtr(local_qp, local, remote_gid, remote_qpn, qp_attr);
+  result_code = ModifyRcQpInitToRtr(local_qp, local, remote_gid, remote_qpn,
+                                    remote_port, qp_attr);
   if (result_code) {
     return absl::InternalError(absl::StrFormat(
         "Modified QP from INIT to RTR failed (%d).", result_code));
@@ -133,7 +145,13 @@ int VerbsHelperSuite::ModifyRcQpInitToRtr(ibv_qp* qp,
                                           ibv_gid remote_gid,
                                           uint32_t remote_qpn,
                                           QpAttribute qp_attr) {
-  ibv_qp_attr mod_rtr = qp_attr.GetRcInitToRtrAttr(local.port, local.gid_index,
+  return VerbsHelperSuite::ModifyRcQpInitToRtr(qp, local, remote_gid, remote_qpn,
+                                        local.port, qp_attr);
+}
+int VerbsHelperSuite::ModifyRcQpInitToRtr(
+    ibv_qp* qp, const PortAttribute& local, ibv_gid remote_gid,
+    uint32_t remote_qpn, uint8_t remote_port, QpAttribute qp_attr) {
+  ibv_qp_attr mod_rtr = qp_attr.GetRcInitToRtrAttr(remote_port, local.gid_index,
                                                    remote_gid, remote_qpn);
   int mask = qp_attr.GetRcInitToRtrMask();
   LOG_IF(DFATAL, mod_rtr.path_mtu > local.attr.active_mtu)  // Crash OK

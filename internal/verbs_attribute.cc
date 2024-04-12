@@ -186,16 +186,17 @@ int QpAttribute::GetRcResetToInitMask() const {
   return IBV_QP_STATE | IBV_QP_ACCESS_FLAGS | IBV_QP_PKEY_INDEX | IBV_QP_PORT;
 }
 
-ibv_qp_attr QpAttribute::GetRcInitToRtrAttr(uint8_t port, uint8_t sgid_index,
-                                            ibv_gid dgid,
+ibv_qp_attr QpAttribute::GetRcInitToRtrAttr(uint8_t remote_port,
+                                            uint8_t sgid_index, ibv_gid dgid,
                                             uint32_t dest_qp_num) const {
-  return ibv_qp_attr{.qp_state = IBV_QPS_RTR,
-                     .path_mtu = path_mtu_,
-                     .rq_psn = rq_psn_,
-                     .dest_qp_num = dest_qp_num,
-                     .ah_attr = ah_attr_.GetAttribute(port, sgid_index, dgid),
-                     .max_dest_rd_atomic = max_dest_rd_atomic_,
-                     .min_rnr_timer = min_rnr_timer_};
+  return ibv_qp_attr{
+      .qp_state = IBV_QPS_RTR,
+      .path_mtu = path_mtu_,
+      .rq_psn = rq_psn_,
+      .dest_qp_num = dest_qp_num,
+      .ah_attr = ah_attr_.GetAttribute(remote_port, sgid_index, dgid),
+      .max_dest_rd_atomic = max_dest_rd_atomic_,
+      .min_rnr_timer = min_rnr_timer_};
 }
 
 int QpAttribute::GetRcInitToRtrMask() const {

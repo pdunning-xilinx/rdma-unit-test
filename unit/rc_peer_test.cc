@@ -122,8 +122,8 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
   absl::StatusOr<std::pair<Client, Client>> CreateConnectedClientsPair(
       int pages = kPages, QpInitAttribute qp_init_attr = QpInitAttribute(),
       QpAttribute qp_attr = QpAttribute()) {
-    struct verbs_util::conn_attr local_host, remote_host;
-    int rc;
+    struct verbs_util::conn_attr local_host {};
+    struct verbs_util::conn_attr remote_host {};
     Client local{};
     Client remote{};
 
@@ -146,32 +146,28 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
       RETURN_IF_ERROR(ibv_.ModifyRcQpResetToRts(remote.qp, remote.port_attr,
                                                 local.port_attr.gid,
                                                 local.qp->qp_num, qp_attr));
-      return std::make_pair(local, remote);
-    }
-
-    synchronise();
-    // Execute Tests in Peer To Peer mode
-    local_host.psn = lrand48() & 0xffffff;
-    if (verbs_util::is_client()) {
+    } else if (verbs_util::is_client()) {
+      local_host.psn = lrand48() & 0xffffff;
       local_host.gid = local.port_attr.gid;
       local_host.lid = local.port_attr.attr.lid;
       local_host.qpn = local.qp->qp_num;
       local_host.port = local.port_attr.port;
       verbs_util::RunPeerClient(local_host, remote_host, comm_socket);
-      rc = connect_peer(local.qp, local_host.psn, remote_host,
-                        remote.port_attr.port, remote.port_attr.gid_index);
+      RETURN_IF_ERROR(ibv_.ModifyRcQpResetToRts(
+          local.qp, local.port_attr, remote_host.gid, remote_host.qpn,
+          remote_host.port, qp_attr));
     } else {
+      local_host.psn = lrand48() & 0xffffff;
       local_host.gid = remote.port_attr.gid;
       local_host.lid = remote.port_attr.attr.lid;
       local_host.qpn = remote.qp->qp_num;
       local_host.port = remote.port_attr.port;
       verbs_util::RunPeerServer(local_host, remote_host, comm_socket);
-      rc = connect_peer(remote.qp, local_host.psn, remote_host,
-                        remote.port_attr.port, remote.port_attr.gid_index);
+      RETURN_IF_ERROR(ibv_.ModifyRcQpResetToRts(
+          remote.qp, remote.port_attr, remote_host.gid, remote_host.qpn,
+          remote_host.port, qp_attr));
     }
-    if (rc) {
-      LOG(FATAL) << "Failed to connect Peer node, Err:" << rc;
-    }
+
     return std::make_pair(local, remote);
   }
 

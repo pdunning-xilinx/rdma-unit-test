@@ -490,9 +490,11 @@ void RecvQpDetails(conn_attr& host, zmq::socket_t& socket) {
   if (!socket.recv(reply, zmq::recv_flags::none)) {
     LOG(FATAL) << "Server: Couldn't read remote QPN";
   } else {
+    uint32_t port_num;
     std::stringstream(reply.to_string()) >> std::hex >> host.qpn >> host.psn >>
-        host.port >> gid >> host.remote_addr >> host.remote_buf_size >>
+        port_num >> gid >> host.remote_addr >> host.remote_buf_size >>
         host.rkey;
+    host.port = uint8_t(port_num);
   }
   wire_gid_to_gid(gid, &host.gid);
 }

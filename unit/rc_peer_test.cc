@@ -66,7 +66,6 @@ using ::testing::NotNull;
 class Peer2PeerRcQpTest : public LoopbackFixture {
  private:
   zmq::context_t comm_context{1};
-  zmq::socket_t comm_socket{};
 
  public:
   static constexpr char kLocalBufferContent = 'a';
@@ -91,32 +90,66 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
         comm_socket.bind("tcp://*:" + std::to_string(peer_port));
       }
     }
+    synchronise();
+  }
+
+  void TearDown() override {
+    LoopbackFixture::TearDown();
+    synchronise(/*last_sync*/ true);
   }
 
  protected:
-  void synchronise() {
+  zmq::socket_t comm_socket{};
+  int sync_count = 0;
+  bool socket_failed = false;
+  void synchronise(bool last_sync = false) {
     if (!verbs_util::peer_mode()) {
       return;
     }
-    static int sync_count = 0;
-    std::string msg = "sync" + std::to_string(sync_count);
+    std::string msg =
+        last_sync ? "last_sync" : "sync" + std::to_string(sync_count);
     zmq::message_t reply{};
-    if (verbs_util::is_client()) {
-      comm_socket.send(zmq::buffer(msg), zmq::send_flags::none);
-      if (!comm_socket.recv(reply, zmq::recv_flags::none) ||
-          (reply.to_string() != msg)) {
-        LOG(FATAL) << "Wrong Sync message received '" << reply.to_string()
-                   << "' expected '" << msg << "'";
+    zmq::recv_result_t received;
+    while (true) {
+      if (verbs_util::is_client()) {
+        comm_socket.send(zmq::buffer(msg), zmq::send_flags::none);
+        received = comm_socket.recv(reply, zmq::recv_flags::none);
+      } else {
+        received = comm_socket.recv(reply, zmq::recv_flags::none);
+        comm_socket.send(zmq::buffer(msg), zmq::send_flags::none);
       }
-    } else {
-      if (!comm_socket.recv(reply, zmq::recv_flags::none) ||
-          (reply.to_string() != msg)) {
-        LOG(FATAL) << "Wrong Sync message received '" << reply.to_string()
-                   << "' expected '" << msg << "'";
+      if (!received) {
+        socket_failed = true;
       }
-      comm_socket.send(zmq::buffer(msg), zmq::send_flags::none);
+      ASSERT_TRUE(received);
+      auto response = reply.to_string();
+      if (response == msg) {
+        break;
+      } else if (sync_count == 0 || (last_sync && response != "sync0")) {
+        std::this_thread::sleep_for(500ms);
+        continue;
+      } else {
+        sync_count++;
+        ASSERT_EQ(response, msg);
+      }
     }
     sync_count++;
+  }
+
+  std::string swap_data(std::string msg) {
+    zmq::message_t reply{};
+    zmq::recv_result_t received;
+    if (!verbs_util::peer_mode()) {
+      return msg;
+    }
+    if (verbs_util::is_client()) {
+      comm_socket.send(zmq::buffer(msg), zmq::send_flags::none);
+      received = comm_socket.recv(reply, zmq::recv_flags::none);
+    } else {
+      received = comm_socket.recv(reply, zmq::recv_flags::none);
+      comm_socket.send(zmq::buffer(msg), zmq::send_flags::none);
+    }
+    return reply.to_string();
   }
 
   absl::StatusOr<std::pair<Client, Client>> CreateConnectedClientsPair(
@@ -138,6 +171,7 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
                   kRemoteBufferContent);
     }
 
+    synchronise();
     // Execute Tests in Loopback mode
     if (!verbs_util::peer_mode()) {
       RETURN_IF_ERROR(ibv_.ModifyRcQpResetToRts(local.qp, local.port_attr,
@@ -244,7 +278,7 @@ TEST_F(Peer2PeerRcQpTest, Send) {
                          verbs_util::WaitForCompletion(remote.cq));
     EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
     EXPECT_EQ(completion.opcode, IBV_WC_RECV);
-    EXPECT_EQ(completion.byte_len, local.buffer.size());
+    EXPECT_EQ(completion.byte_len, remote.buffer.size());
     EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
     EXPECT_EQ(completion.wr_id, 0);
     EXPECT_EQ(completion.wc_flags, 0);
@@ -320,7 +354,7 @@ TEST_F(Peer2PeerRcQpTest, UnsignaledSend) {
                          verbs_util::WaitForCompletion(remote.cq));
     EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
     EXPECT_EQ(completion.opcode, IBV_WC_RECV);
-    EXPECT_EQ(completion.byte_len, local.buffer.size());
+    EXPECT_EQ(completion.byte_len, remote.buffer.size());
     EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
     EXPECT_EQ(completion.wr_id, 0);
     EXPECT_EQ(completion.wc_flags, 0);
@@ -340,29 +374,41 @@ TEST_F(Peer2PeerRcQpTest, SendLargeChunk) {
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote),
                        CreateConnectedClientsPair(kLargePayloadPages));
 
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  synchronise();
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  verbs_util::PostSend(local.qp, send);
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    verbs_util::PostSend(local.qp, send);
+  }
+  synchronise();
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RECV);
-  EXPECT_EQ(completion.byte_len, local.buffer.size());
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
-  EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+  }
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RECV);
+    EXPECT_EQ(completion.byte_len, remote.buffer.size());
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, SendInlineData) {
@@ -374,46 +420,60 @@ TEST_F(Peer2PeerRcQpTest, SendInlineData) {
       std::tie(local, remote),
       CreateConnectedClientsPair(
           kPages, QpInitAttribute().set_max_inline_data(valid_inline_size)));
-  ASSERT_GE(remote.buffer.size(), valid_inline_size)
-      << "receiver buffer too small";
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_GE(remote.buffer.size(), valid_inline_size)
+        << "receiver buffer too small";
 
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  synchronise();
 
-  // a vector which is not registered to pd or mr
-  auto data_src = std::make_unique<std::vector<uint8_t>>(valid_inline_size);
-  std::fill(data_src->begin(), data_src->end(), 'c');
-  ibv_sge lsge{
-      .addr = reinterpret_cast<uint64_t>(data_src->data()),
-      .length = valid_inline_size,
-      .lkey = 0xDEADBEEF,  // random bad keys
-  };
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  send.send_flags |= IBV_SEND_INLINE;
-  verbs_util::PostSend(local.qp, send);
-  (*data_src)[0] = kLocalBufferContent;  // source can be modified immediately
-  data_src.reset();  // delete the source buffer immediately after post_send()
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    // a vector which is not registered to pd or mr
+    auto data_src = std::make_unique<std::vector<uint8_t>>(valid_inline_size);
+    std::fill(data_src->begin(), data_src->end(), 'c');
+    ibv_sge lsge{
+        .addr = reinterpret_cast<uint64_t>(data_src->data()),
+        .length = valid_inline_size,
+        .lkey = 0xDEADBEEF,  // random bad keys
+    };
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    send.send_flags |= IBV_SEND_INLINE;
+    verbs_util::PostSend(local.qp, send);
+    (*data_src)[0] = kLocalBufferContent;  // source can be modified immediately
+    data_src.reset();  // delete the source buffer immediately after post_send()
+  }
+  synchronise();
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RECV);
-  EXPECT_EQ(completion.byte_len, valid_inline_size);
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
-  EXPECT_THAT(absl::MakeSpan(remote.buffer.data(), valid_inline_size),
-              Each('c'));
-  EXPECT_THAT(absl::MakeSpan(remote.buffer.data() + valid_inline_size,
-                             remote.buffer.data() + remote.buffer.size()),
-              Each(kRemoteBufferContent));
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RECV);
+    EXPECT_EQ(completion.byte_len, valid_inline_size);
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    EXPECT_THAT(absl::MakeSpan(remote.buffer.data(), valid_inline_size),
+                Each('c'));
+    EXPECT_THAT(absl::MakeSpan(remote.buffer.data() + valid_inline_size,
+                               remote.buffer.data() + remote.buffer.size()),
+                Each(kRemoteBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, SendExceedMaxInlineData) {
@@ -425,33 +485,46 @@ TEST_F(Peer2PeerRcQpTest, SendExceedMaxInlineData) {
       std::tie(local, remote),
       CreateConnectedClientsPair(
           kPages, QpInitAttribute().set_max_inline_data(valid_inline_size)));
-  ASSERT_GE(remote.buffer.size(), valid_inline_size)
-      << "receiver buffer too small";
-  const uint32_t actual_max_inline_data =
-      verbs_util::GetQpCap(local.qp).max_inline_data;
-  // a vector which is not registered to pd or mr
-  auto data_src =
-      std::make_unique<std::vector<uint8_t>>(actual_max_inline_data + 10);
-  std::fill(data_src->begin(), data_src->end(), 'c');
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    ASSERT_GE(remote.buffer.size(), valid_inline_size)
+        << "receiver buffer too small";
+  }
+  synchronise();
+  std::unique_ptr<std::vector<uint8_t>> data_src;
+  if (local.qp) {
+    const uint32_t actual_max_inline_data =
+        verbs_util::GetQpCap(local.qp).max_inline_data;
+    // a vector which is not registered to pd or mr
+    data_src =
+        std::make_unique<std::vector<uint8_t>>(actual_max_inline_data + 10);
+    std::fill(data_src->begin(), data_src->end(), 'c');
+  }
+  synchronise();
 
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+  if (remote.qp) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  synchronise();
 
-  ibv_sge lsge{
-      .addr = reinterpret_cast<uint64_t>(data_src->data()),
-      .length = static_cast<uint32_t>(data_src->size()),
-      .lkey = 0xDEADBEEF,  // random bad keys
-  };
+  if (local.qp) {
+    ibv_sge lsge{
+        .addr = reinterpret_cast<uint64_t>(data_src->data()),
+        .length = static_cast<uint32_t>(data_src->size()),
+        .lkey = 0xDEADBEEF,  // random bad keys
+    };
 
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  send.send_flags |= IBV_SEND_INLINE;
-  ibv_send_wr* bad_wr;
-  EXPECT_THAT(ibv_post_send(local.qp, &send, &bad_wr),
-              AnyOf(EPERM, ENOMEM, EINVAL));
-  EXPECT_TRUE(verbs_util::ExpectNoCompletion(local.cq));
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    send.send_flags |= IBV_SEND_INLINE;
+    ibv_send_wr* bad_wr;
+    EXPECT_THAT(ibv_post_send(local.qp, &send, &bad_wr),
+                AnyOf(EPERM, ENOMEM, EINVAL));
+    EXPECT_TRUE(verbs_util::ExpectNoCompletion(local.cq));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, SendInlineDataInvalidOp) {
@@ -461,42 +534,48 @@ TEST_F(Peer2PeerRcQpTest, SendInlineDataInvalidOp) {
       std::tie(local, remote),
       CreateConnectedClientsPair(kPages, QpInitAttribute().set_max_inline_data(
                                              kProposedMaxInlineData)));
-  ASSERT_GE(remote.buffer.size(), kProposedMaxInlineData)
-      << "receiver buffer too small";
-  ibv_qp_attr attr;
-  ibv_qp_init_attr init_attr;
-  ASSERT_EQ(ibv_query_qp(local.qp, &attr, IBV_QP_CAP, &init_attr), 0);
-  // a vector which is not registered to pd or mr
-  auto data_src =
-      std::make_unique<std::vector<uint8_t>>(kProposedMaxInlineData);
-  std::fill(data_src->begin(), data_src->end(), 'c');
+  if (local.qp) {
+    ASSERT_GE(local.remote.size, kProposedMaxInlineData)
+        << "receiver buffer too small";
+    ibv_qp_attr attr;
+    ibv_qp_init_attr init_attr;
+    ASSERT_EQ(ibv_query_qp(local.qp, &attr, IBV_QP_CAP, &init_attr), 0);
+    // a vector which is not registered to pd or mr
+    auto data_src =
+        std::make_unique<std::vector<uint8_t>>(kProposedMaxInlineData);
+    std::fill(data_src->begin(), data_src->end(), 'c');
 
-  ibv_sge lsge{
-      .addr = reinterpret_cast<uint64_t>(data_src->data()),
-      .length = init_attr.cap.max_inline_data,
-      .lkey = 0xDEADBEEF,  // random bad keys
-  };
+    ibv_sge lsge{
+        .addr = reinterpret_cast<uint64_t>(data_src->data()),
+        .length = init_attr.cap.max_inline_data,
+        .lkey = 0xDEADBEEF,  // random bad keys
+    };
 
-  // Inline data is only for send and RDMA write. Post a read here.
-  ibv_send_wr read = verbs_util::CreateReadWr(
-      /*wr_id=*/1, &lsge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
-  read.send_flags |= IBV_SEND_INLINE;
-  ibv_send_wr* bad_wr;
-  // Undefined behavior according to spec.
-  int result = ibv_post_send(local.qp, &read, &bad_wr);
-  if (result == 0) {
-    (*data_src)[0] = kLocalBufferContent;  // source can be modified immediately
-    data_src.reset();  // delete the source buffer immediately after post_send()
+    // Inline data is only for send and RDMA write. Post a read here.
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &lsge, /*num_sge=*/1, local.remote.addr,
+        local.remote.rkey);
+    read.send_flags |= IBV_SEND_INLINE;
+    ibv_send_wr* bad_wr;
+    // Undefined behavior according to spec.
+    int result = ibv_post_send(local.qp, &read, &bad_wr);
+    if (result == 0) {
+      (*data_src)[0] =
+          kLocalBufferContent;  // source can be modified immediately
+      data_src
+          .reset();  // delete the source buffer immediately after post_send()
 
-    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                         verbs_util::WaitForCompletion(local.cq));
-    EXPECT_THAT(completion.status,
-                AnyOf(IBV_WC_LOC_QP_OP_ERR, IBV_WC_LOC_PROT_ERR));
-    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-    EXPECT_EQ(completion.wr_id, 1);
-  } else {
-    EXPECT_EQ(result, EINVAL);
+      ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                           verbs_util::WaitForCompletion(local.cq));
+      EXPECT_THAT(completion.status,
+                  AnyOf(IBV_WC_LOC_QP_OP_ERR, IBV_WC_LOC_PROT_ERR));
+      EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+      EXPECT_EQ(completion.wr_id, 1);
+    } else {
+      EXPECT_EQ(result, EINVAL);
+    }
   }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, SendImmData) {
@@ -567,8 +646,7 @@ TEST_F(Peer2PeerRcQpTest, SendRecvOnlyImmData) {
     send.imm_data = kImm;
     verbs_util::PostSend(local.qp, send);
 
-    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                         verbs_util::WaitForCompletion(local.cq));
+    ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(local.cq));
     EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
     EXPECT_EQ(completion.opcode, IBV_WC_SEND);
     EXPECT_EQ(completion.qp_num, local.qp->qp_num);
@@ -623,55 +701,75 @@ TEST_F(Peer2PeerRcQpTest, SendWithInvalidate) {
   }
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  // Bind a Type 2 MW on remote.
-  static constexpr uint32_t rkey = 0xBA;
-  ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_2);
-  ASSERT_THAT(mw, NotNull());
-  ASSERT_THAT(verbs_util::ExecuteType2MwBind(
-                  remote.qp, mw, remote.buffer.span(), rkey, remote.mr),
-              IsOkAndHolds(IBV_WC_SUCCESS));
+  uint32_t remote_rkey = 0;
+  ibv_mw* mw;
+  if (remote.qp) {
+    // Bind a Type 2 MW on remote.
+    mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_2);
+    static constexpr uint32_t rkey = 0xBA;
+    ASSERT_THAT(mw, NotNull());
+    ASSERT_THAT(verbs_util::ExecuteType2MwBind(
+                    remote.qp, mw, remote.buffer.span(), rkey, remote.mr),
+                IsOkAndHolds(IBV_WC_SUCCESS));
 
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  send.opcode = IBV_WR_SEND_WITH_INV;
-  send.invalidate_rkey = mw->rkey;
-  verbs_util::PostSend(local.qp, send);
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+    remote_rkey = mw->rkey;
+  }
+  synchronise();
+  auto remote_rkey_str = swap_data(std::to_string(remote_rkey));
+  if (local.qp) {
+    std::stringstream(remote_rkey_str) >> remote_rkey;
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    send.opcode = IBV_WR_SEND_WITH_INV;
+    send.invalidate_rkey = remote_rkey;
+    verbs_util::PostSend(local.qp, send);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RECV);
-  EXPECT_EQ(completion.byte_len, remote.buffer.size());
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
-  EXPECT_EQ(completion.wc_flags, IBV_WC_WITH_INV);
-  EXPECT_EQ(mw->rkey, completion.invalidated_rkey);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RECV);
+    EXPECT_EQ(completion.byte_len, remote.buffer.size());
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    EXPECT_EQ(completion.wc_flags, IBV_WC_WITH_INV);
+    EXPECT_EQ(mw->rkey, completion.invalidated_rkey);
 
-  EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+    EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+  }
+  synchronise();
 
-  // Check that rkey is invalid.
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr read = verbs_util::CreateReadWr(/*wr_id=*/1, &sge, /*num_sge=*/1,
-                                              remote.buffer.data(), mw->rkey);
-  read.wr_id = 2;
-  verbs_util::PostSend(local.qp, read);
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_ACCESS_ERR;
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, expected);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 2);
+  if (local.qp) {
+    // Check that rkey is invalid.
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, remote_rkey);
+    read.wr_id = 2;
+    verbs_util::PostSend(local.qp, read);
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_ACCESS_ERR;
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 2);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, SendWithInvalidateEmptySgl) {
@@ -683,47 +781,65 @@ TEST_F(Peer2PeerRcQpTest, SendWithInvalidateEmptySgl) {
   }
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  // Bind a Type 2 MW on remote.
-  static constexpr uint32_t rkey = 0xBA;
-  ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_2);
-  ASSERT_THAT(mw, NotNull());
-  ASSERT_THAT(verbs_util::ExecuteType2MwBind(
-                  remote.qp, mw, remote.buffer.span(), rkey, remote.mr),
-              IsOkAndHolds(IBV_WC_SUCCESS));
+  uint32_t remote_rkey = 0;
+  ibv_mw* mw;
+  if (remote.qp) {
+    // Bind a Type 2 MW on remote.
+    static constexpr uint32_t rkey = 0xBA;
+    mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_2);
+    ASSERT_THAT(mw, NotNull());
+    ASSERT_THAT(verbs_util::ExecuteType2MwBind(
+                    remote.qp, mw, remote.buffer.span(), rkey, remote.mr),
+                IsOkAndHolds(IBV_WC_SUCCESS));
 
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, nullptr, /*num_sge=*/0);
-  verbs_util::PostRecv(remote.qp, recv);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, nullptr, /*num_sge=*/0);
-  send.opcode = IBV_WR_SEND_WITH_INV;
-  send.invalidate_rkey = mw->rkey;
-  verbs_util::PostSend(local.qp, send);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, nullptr, /*num_sge=*/0);
+    verbs_util::PostRecv(remote.qp, recv);
+    remote_rkey = mw->rkey;
+  }
+  synchronise();
+  auto remote_rkey_str = swap_data(std::to_string(remote_rkey));
+  if (local.qp) {
+    std::stringstream(remote_rkey_str) >> remote_rkey;
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, nullptr, /*num_sge=*/0);
+    send.opcode = IBV_WR_SEND_WITH_INV;
+    send.invalidate_rkey = remote_rkey;
+    verbs_util::PostSend(local.qp, send);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RECV);
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
-  EXPECT_EQ(completion.wc_flags, IBV_WC_WITH_INV);
-  EXPECT_EQ(mw->rkey, completion.invalidated_rkey);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RECV);
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    EXPECT_EQ(completion.wc_flags, IBV_WC_WITH_INV);
+    EXPECT_EQ(mw->rkey, completion.invalidated_rkey);
+  }
+  synchronise();
 
-  // Check that rkey is invalid.
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr read = verbs_util::CreateReadWr(/*wr_id=*/1, &sge, /*num_sge=*/1,
-                                              remote.buffer.data(), mw->rkey);
-  read.wr_id = 2;
-  verbs_util::PostSend(local.qp, read);
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 2);
+  if (local.qp) {
+    // Check that rkey is invalid.
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote_rkey);
+    read.wr_id = 2;
+    verbs_util::PostSend(local.qp, read);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 2);
+  }
 }
 
 TEST_F(Peer2PeerRcQpTest, SendWithInvalidateNoBuffer) {
@@ -732,29 +848,39 @@ TEST_F(Peer2PeerRcQpTest, SendWithInvalidateNoBuffer) {
   }
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  // Bind a Type 2 MW on remote.
-  static constexpr uint32_t rkey = 0xBA;
-  ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_2);
-  ASSERT_THAT(mw, NotNull());
-  ASSERT_THAT(verbs_util::ExecuteType2MwBind(
-                  remote.qp, mw, remote.buffer.span(), rkey, remote.mr),
-              IsOkAndHolds(IBV_WC_SUCCESS));
+  uint32_t remote_rkey = 0;
+  ibv_mw* mw;
+  if (remote.qp) {
+    // Bind a Type 2 MW on remote.
+    static constexpr uint32_t rkey = 0xBA;
+    mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_2);
+    ASSERT_THAT(mw, NotNull());
+    ASSERT_THAT(verbs_util::ExecuteType2MwBind(
+                    remote.qp, mw, remote.buffer.span(), rkey, remote.mr),
+                IsOkAndHolds(IBV_WC_SUCCESS));
+    remote_rkey = mw->rkey;
+  }
+  synchronise();
+  auto remote_rkey_str = swap_data(std::to_string(remote_rkey));
+  if (local.qp) {
+    std::stringstream(remote_rkey_str) >> remote_rkey;
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    send.opcode = IBV_WR_SEND_WITH_INV;
+    send.invalidate_rkey = remote_rkey;
+    verbs_util::PostSend(local.qp, send);
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  send.opcode = IBV_WR_SEND_WITH_INV;
-  send.invalidate_rkey = mw->rkey;
-  verbs_util::PostSend(local.qp, send);
-
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_RNR_RETRY_EXC_ERR;
-  EXPECT_EQ(completion.status, expected);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_RNR_RETRY_EXC_ERR;
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
 }
 
 TEST_F(Peer2PeerRcQpTest, SendWithInvalidateBadRkey) {
@@ -763,37 +889,49 @@ TEST_F(Peer2PeerRcQpTest, SendWithInvalidateBadRkey) {
   }
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  // Bind a Type 2 MW on remote.
-  static constexpr uint32_t rkey = 0xBA;
-  ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_2);
-  ASSERT_THAT(mw, NotNull());
-  ASSERT_THAT(verbs_util::ExecuteType2MwBind(
-                  remote.qp, mw, remote.buffer.span(), rkey, remote.mr),
-              IsOkAndHolds(IBV_WC_SUCCESS));
+  uint32_t remote_rkey = 0;
+  ibv_recv_wr recv;
+  if (remote.qp) {
+    // Bind a Type 2 MW on remote.
+    static constexpr uint32_t rkey = 0xBA;
+    ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_2);
+    ASSERT_THAT(mw, NotNull());
+    ASSERT_THAT(verbs_util::ExecuteType2MwBind(
+                    remote.qp, mw, remote.buffer.span(), rkey, remote.mr),
+                IsOkAndHolds(IBV_WC_SUCCESS));
 
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    recv = verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+    remote_rkey = mw->rkey;
+  }
+  synchronise();
+  auto remote_rkey_str = swap_data(std::to_string(remote_rkey));
+  if (local.qp) {
+    std::stringstream(remote_rkey_str) >> remote_rkey;
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    send.opcode = IBV_WR_SEND_WITH_INV;
+    // Invalid rkey.
+    send.invalidate_rkey = (remote_rkey + 10) * 5;
+    verbs_util::PostSend(local.qp, send);
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  send.opcode = IBV_WR_SEND_WITH_INV;
-  // Invalid rkey.
-  send.invalidate_rkey = (mw->rkey + 10) * 5;
-  verbs_util::PostSend(local.qp, send);
-
-  // When a send with invalidate failed, the responder should not send out a
-  // NAK code, see IB spec 9.9.6.3 responder error behavior (class J error). The
-  // requester should not send out a completion in this case.
-  EXPECT_TRUE(verbs_util::ExpectNoCompletion(local.cq));
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(remote.cq));
-  // General memory management error undefined in ibverbs.
-  EXPECT_THAT(completion.status, Ne(IBV_WC_SUCCESS));
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, recv.wr_id);
+    // When a send with invalidate failed, the responder should not send out a
+    // NAK code, see IB spec 9.9.6.3 responder error behavior (class J error).
+    // The requester should not send out a completion in this case.
+    EXPECT_TRUE(verbs_util::ExpectNoCompletion(local.cq));
+  }
+  synchronise();
+  if (remote.qp) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    // General memory management error undefined in ibverbs.
+    EXPECT_THAT(completion.status, Ne(IBV_WC_SUCCESS));
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, recv.wr_id);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, SendWithInvalidateType1Rkey) {
@@ -802,36 +940,48 @@ TEST_F(Peer2PeerRcQpTest, SendWithInvalidateType1Rkey) {
       std::tie(local, remote),
       CreateConnectedClientsPair(kPages, QpInitAttribute(),
                                  QpAttribute().set_timeout(absl::Seconds(1))));
-  // Bind a Type 1 MW on remote.
-  ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_1);
-  ASSERT_THAT(mw, NotNull());
-  ASSERT_THAT(verbs_util::ExecuteType1MwBind(remote.qp, mw,
-                                             remote.buffer.span(), remote.mr),
-              IsOkAndHolds(IBV_WC_SUCCESS));
+  uint32_t remote_rkey = 0;
+  ibv_mw* mw;
+  if (remote.qp) {
+    // Bind a Type 1 MW on remote.
+    mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_1);
+    ASSERT_THAT(mw, NotNull());
+    ASSERT_THAT(verbs_util::ExecuteType1MwBind(remote.qp, mw,
+                                               remote.buffer.span(), remote.mr),
+                IsOkAndHolds(IBV_WC_SUCCESS));
 
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+    remote_rkey = mw->rkey;
+  }
+  synchronise();
+  auto remote_rkey_str = swap_data(std::to_string(remote_rkey));
+  if (local.qp) {
+    std::stringstream(remote_rkey_str) >> remote_rkey;
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    send.opcode = IBV_WR_SEND_WITH_INV;
+    // Type1 rkey.
+    send.invalidate_rkey = remote_rkey;
+    verbs_util::PostSend(local.qp, send);
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  send.opcode = IBV_WR_SEND_WITH_INV;
-  // Type1 rkey.
-  send.invalidate_rkey = mw->rkey;
-  verbs_util::PostSend(local.qp, send);
-
-  // When a send with invalidate failed, the responder should not send out a
-  // NAK code, see IB spec 9.9.6.3 responder error behavior (class J error). The
-  // requester should not send out a completion in this case.
-  EXPECT_TRUE(verbs_util::ExpectNoCompletion(local.cq));
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(remote.cq));
-  // Memory management error (IB Spec 11.6.2) undefined for ibverbs.
-  EXPECT_THAT(completion.status, Ne(IBV_WC_SUCCESS));
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
+    // When a send with invalidate failed, the responder should not send out a
+    // NAK code, see IB spec 9.9.6.3 responder error behavior (class J error).
+    // The requester should not send out a completion in this case.
+    EXPECT_TRUE(verbs_util::ExpectNoCompletion(local.cq));
+  }
+  synchronise();
+  if (remote.qp) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    // Memory management error (IB Spec 11.6.2) undefined for ibverbs.
+    EXPECT_THAT(completion.status, Ne(IBV_WC_SUCCESS));
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+  }
 }
 
 // Send with Invalidate targeting another QPs MW.
@@ -841,84 +991,114 @@ TEST_F(Peer2PeerRcQpTest, SendWithInvalidateWrongQp) {
   }
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  // Bind a Type 2 MW on local qp.
-  static constexpr uint32_t rkey = 0xBA;
-  ibv_mw* mw = ibv_.AllocMw(local.pd, IBV_MW_TYPE_2);
-  ASSERT_THAT(mw, NotNull());
-  ASSERT_THAT(verbs_util::ExecuteType2MwBind(local.qp, mw, local.buffer.span(),
-                                             rkey, local.mr),
-              IsOkAndHolds(IBV_WC_SUCCESS));
+  ibv_mw* mw;
+  if (local.qp) {
+    // Bind a Type 2 MW on local qp.
+    static constexpr uint32_t rkey = 0xBA;
+    mw = ibv_.AllocMw(local.pd, IBV_MW_TYPE_2);
+    ASSERT_THAT(mw, NotNull());
+    ASSERT_THAT(verbs_util::ExecuteType2MwBind(
+                    local.qp, mw, local.buffer.span(), rkey, local.mr),
+                IsOkAndHolds(IBV_WC_SUCCESS));
+  }
+  synchronise();
 
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+  ibv_recv_wr recv;
+  if (remote.qp) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    recv = verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  synchronise();
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  send.opcode = IBV_WR_SEND_WITH_INV;
-  send.invalidate_rkey = mw->rkey;
-  verbs_util::PostSend(local.qp, send);
+  if (local.qp) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    send.opcode = IBV_WR_SEND_WITH_INV;
+    send.invalidate_rkey = mw->rkey;
+    verbs_util::PostSend(local.qp, send);
 
-  // When a send with invalidate failed, the responder should not send out a
-  // NAK code, see IB spec 9.9.6.3 responder error behavior (class J error). The
-  // requester should not send out a completion in this case.
-  EXPECT_TRUE(verbs_util::ExpectNoCompletion(local.cq));
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(remote.cq));
-  // General memory management error undefined in ibverbs.
-  EXPECT_THAT(completion.status, Ne(IBV_WC_SUCCESS));
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, recv.wr_id);
+    // When a send with invalidate failed, the responder should not send out a
+    // NAK code, see IB spec 9.9.6.3 responder error behavior (class J error).
+    // The requester should not send out a completion in this case.
+    EXPECT_TRUE(verbs_util::ExpectNoCompletion(local.cq));
+  }
+  synchronise();
+  if (remote.qp) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    // General memory management error undefined in ibverbs.
+    EXPECT_THAT(completion.status, Ne(IBV_WC_SUCCESS));
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, recv.wr_id);
+  }
 }
 
 TEST_F(Peer2PeerRcQpTest, SendWithTooSmallRecv) {
   // Recv buffer is to small to fit the whole buffer.
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  const uint32_t kRecvLength = local.buffer.span().size() - 1;
-  sge.length = kRecvLength;
-  ibv_recv_wr recv = verbs_util::CreateRecvWr(/*wr_id=*/0, &sge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+  if (remote.qp) {
+    ibv_sge sge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    const uint32_t kRecvLength = remote.remote.size - 1;
+    sge.length = kRecvLength;
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &sge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  synchronise();
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  verbs_util::PostSend(local.qp, send);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_REM_INV_REQ_ERR);
-  EXPECT_EQ(local.qp->qp_num, completion.qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
+  if (local.qp) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    verbs_util::PostSend(local.qp, send);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_REM_INV_REQ_ERR);
+    EXPECT_EQ(local.qp->qp_num, completion.qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
 
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_LOC_LEN_ERR);
-  EXPECT_EQ(remote.qp->qp_num, completion.qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
+  if (remote.qp) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_LEN_ERR);
+    EXPECT_EQ(remote.qp->qp_num, completion.qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
+  }
+  synchronise();
 
-  EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
-  EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
+  if (local.qp) {
+    EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, SendRnr) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  verbs_util::PostSend(local.qp, send);
+  if (local.qp) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    verbs_util::PostSend(local.qp, send);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_RNR_RETRY_EXC_ERR;
-  EXPECT_EQ(completion.status, expected);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_RNR_RETRY_EXC_ERR;
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, SendRnrInfiniteRetries) {
@@ -929,19 +1109,22 @@ TEST_F(Peer2PeerRcQpTest, SendRnrInfiniteRetries) {
       CreateConnectedClientsPair(kPages, QpInitAttribute(),
                                  QpAttribute().set_rnr_retry(7)));
 
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  verbs_util::PostSend(local.qp, send);
-  if (Introspection().GeneratesRetryExcOnConnTimeout()) {
-    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                         verbs_util::WaitForCompletion(local.cq));
-    EXPECT_EQ(completion.status, IBV_WC_RETRY_EXC_ERR);
-    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-    EXPECT_EQ(completion.wr_id, 1);
-  } else {
-    EXPECT_TRUE(verbs_util::ExpectNoCompletion(local.cq));
+  if (local.qp) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    verbs_util::PostSend(local.qp, send);
+    if (Introspection().GeneratesRetryExcOnConnTimeout()) {
+      ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                           verbs_util::WaitForCompletion(local.cq));
+      EXPECT_EQ(completion.status, IBV_WC_RETRY_EXC_ERR);
+      EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+      EXPECT_EQ(completion.wr_id, 1);
+    } else {
+      EXPECT_TRUE(verbs_util::ExpectNoCompletion(local.cq));
+    }
   }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, BadSendAddr) {
@@ -980,81 +1163,113 @@ TEST_F(Peer2PeerRcQpTest, BadSendAddr) {
 TEST_F(Peer2PeerRcQpTest, BadRecvAddr) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  --rsge.addr;
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  verbs_util::PostSend(local.qp, send);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_REM_OP_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
+  if (remote.qp) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    --rsge.addr;
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  synchronise();
+  if (local.qp) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    verbs_util::PostSend(local.qp, send);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_REM_OP_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, RecvOnDeregisteredRegion) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
-  // Deregister the MR before send is posted.
-  ASSERT_EQ(ibv_.DeregMr(remote.mr), 0);
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  verbs_util::PostSend(local.qp, send);
+  if (remote.qp) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+    // Deregister the MR before send is posted.
+    ASSERT_EQ(ibv_.DeregMr(remote.mr), 0);
+  }
+  synchronise();
+  if (local.qp) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    verbs_util::PostSend(local.qp, send);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  // The op code isn't set by the hardware in the error case.
-  EXPECT_EQ(completion.status, IBV_WC_REM_OP_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
-  EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    // The op code isn't set by the hardware in the error case.
+    EXPECT_EQ(completion.status, IBV_WC_REM_OP_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
+    EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
+  }
+  synchronise();
 
-  EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
-  EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
+  if (local.qp) {
+    EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, RecvPayloadExceedMr) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_mr* shorter_recv_mr = ibv_.RegMr(
-      remote.pd, remote.buffer.subblock(0, remote.buffer.size() - 32));
-  ASSERT_THAT(shorter_recv_mr, NotNull());
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), shorter_recv_mr);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  verbs_util::PostSend(local.qp, send);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, IBV_WC_REM_OP_ERR);
+  if (remote.qp) {
+    ibv_mr* shorter_recv_mr = ibv_.RegMr(
+        remote.pd, remote.buffer.subblock(0, remote.buffer.size() - 32));
+    ASSERT_THAT(shorter_recv_mr, NotNull());
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), shorter_recv_mr);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  synchronise();
+  if (local.qp) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    verbs_util::PostSend(local.qp, send);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, IBV_WC_REM_OP_ERR);
+  }
+  synchronise();
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion2,
-                       verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion2.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion2.wr_id, 0);
-  EXPECT_EQ(completion2.status, IBV_WC_LOC_PROT_ERR);
+  if (remote.qp) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion2,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion2.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion2.wr_id, 0);
+    EXPECT_EQ(completion2.status, IBV_WC_LOC_PROT_ERR);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, SendBufferExceedMr) {
@@ -1096,145 +1311,181 @@ TEST_F(Peer2PeerRcQpTest, SendBufferExceedMr) {
 TEST_F(Peer2PeerRcQpTest, RecvBufferExceedMr) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_mr* recv_mr =
-      ibv_.RegMr(remote.pd, remote.buffer.subblock(0, remote.buffer.size()));
-  ASSERT_THAT(recv_mr, NotNull());
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), recv_mr);
-  rsge.length += 32;
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  verbs_util::PostSend(local.qp, send);
+  if (remote.qp) {
+    ibv_mr* recv_mr =
+        ibv_.RegMr(remote.pd, remote.buffer.subblock(0, remote.buffer.size()));
+    ASSERT_THAT(recv_mr, NotNull());
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), recv_mr);
+    rsge.length += 32;
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  synchronise();
+  if (local.qp) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    verbs_util::PostSend(local.qp, send);
 
-  // Behavior for recv SGL longer than the MR (but the payload is not) is not
-  // *strictly* defined by the IBTA spec.
-  // On Mellanox NICs, we expect the recv WR result in a success.
-  // On MEV, we expect the recv WR result in IBV_WC_LOC_PROT_ERR, and the
-  // send fail with IBV_WC_REM_OP_ERR
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_THAT(completion.status, AnyOf(IBV_WC_SUCCESS, IBV_WC_REM_OP_ERR));
+    // Behavior for recv SGL longer than the MR (but the payload is not) is not
+    // *strictly* defined by the IBTA spec.
+    // On Mellanox NICs, we expect the recv WR result in a success.
+    // On MEV, we expect the recv WR result in IBV_WC_LOC_PROT_ERR, and the
+    // send fail with IBV_WC_REM_OP_ERR
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_THAT(completion.status, AnyOf(IBV_WC_SUCCESS, IBV_WC_REM_OP_ERR));
+  }
+  synchronise();
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion2,
-                       verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion2.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion2.wr_id, 0);
-  EXPECT_THAT(completion2.status, AnyOf(IBV_WC_SUCCESS, IBV_WC_LOC_PROT_ERR));
+  if (remote.qp) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion2,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion2.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion2.wr_id, 0);
+    EXPECT_THAT(completion2.status, AnyOf(IBV_WC_SUCCESS, IBV_WC_LOC_PROT_ERR));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, BadRecvLkey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  // Change lkey to be invalid.
-  rsge.lkey = (rsge.lkey + 10) * 5;
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
-  ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr send =
-      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
-  verbs_util::PostSend(local.qp, send);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_REM_OP_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
+  if (remote.qp) {
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    // Change lkey to be invalid.
+    rsge.lkey = (rsge.lkey + 10) * 5;
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  synchronise();
+  if (local.qp) {
+    ibv_sge lsge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+    verbs_util::PostSend(local.qp, send);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_REM_OP_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, SendInvalidLkey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  // Change lkey to be invalid.
-  sge.lkey = (sge.lkey + 10) * 5;
-  ibv_send_wr send = verbs_util::CreateSendWr(/*wr_id=*/1, &sge, /*num_sge=*/1);
-  verbs_util::PostSend(local.qp, send);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
-  // Existing hardware does not set opcode on error.
-  EXPECT_EQ(completion.wr_id, 1);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    // Change lkey to be invalid.
+    sge.lkey = (sge.lkey + 10) * 5;
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &sge, /*num_sge=*/1);
+    verbs_util::PostSend(local.qp, send);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    // Existing hardware does not set opcode on error.
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, UnsignaledSendError) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  // Change lkey to be invalid.
-  sge.lkey = (sge.lkey + 10) * 5;
-  ibv_send_wr send = verbs_util::CreateSendWr(/*wr_id=*/1, &sge, /*num_sge=*/1);
-  send.send_flags = send.send_flags & ~IBV_SEND_SIGNALED;
-  verbs_util::PostSend(local.qp, send);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    // Change lkey to be invalid.
+    sge.lkey = (sge.lkey + 10) * 5;
+    ibv_send_wr send =
+        verbs_util::CreateSendWr(/*wr_id=*/1, &sge, /*num_sge=*/1);
+    send.send_flags = send.send_flags & ~IBV_SEND_SIGNALED;
+    verbs_util::PostSend(local.qp, send);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, BasicRead) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr read = verbs_util::CreateReadWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  verbs_util::PostSend(local.qp, read);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    verbs_util::PostSend(local.qp, read);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_THAT(local.buffer.span(), Each(kRemoteBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_THAT(local.buffer.span(), Each(kRemoteBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, BasicReadLargePayload) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote),
                        CreateConnectedClientsPair(kLargePayloadPages));
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr read = verbs_util::CreateReadWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  verbs_util::PostSend(local.qp, read);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    verbs_util::PostSend(local.qp, read);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_THAT(local.buffer.span(), Each(kRemoteBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_THAT(local.buffer.span(), Each(kRemoteBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, UnsignaledRead) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr read = verbs_util::CreateReadWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  read.send_flags = read.send_flags & ~IBV_SEND_SIGNALED;
-  verbs_util::PostSend(local.qp, read);
-  read.send_flags = read.send_flags | IBV_SEND_SIGNALED;
-  read.wr_id = 2;
-  verbs_util::PostSend(local.qp, read);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    read.send_flags = read.send_flags & ~IBV_SEND_SIGNALED;
+    verbs_util::PostSend(local.qp, read);
+    read.send_flags = read.send_flags | IBV_SEND_SIGNALED;
+    read.wr_id = 2;
+    verbs_util::PostSend(local.qp, read);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 2);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 2);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, QpSigAll) {
@@ -1243,40 +1494,53 @@ TEST_F(Peer2PeerRcQpTest, QpSigAll) {
       std::tie(local, remote),
       CreateConnectedClientsPair(kPages, QpInitAttribute().set_sq_sig_all(1)));
 
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr read = verbs_util::CreateReadWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  read.send_flags = read.send_flags & ~IBV_SEND_SIGNALED;
-  verbs_util::PostSend(local.qp, read);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    read.send_flags = read.send_flags & ~IBV_SEND_SIGNALED;
+    verbs_util::PostSend(local.qp, read);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, Type1MWRead) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  // Bind a Type 1 MW on remote.
-  ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_1);
-  ASSERT_THAT(mw, NotNull());
-  ASSERT_THAT(verbs_util::ExecuteType1MwBind(remote.qp, mw,
-                                             remote.buffer.span(), remote.mr),
-              IsOkAndHolds(IBV_WC_SUCCESS));
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr read = verbs_util::CreateReadWr(/*wr_id=*/1, &sge, /*num_sge=*/1,
-                                              remote.buffer.data(), mw->rkey);
-  verbs_util::PostSend(local.qp, read);
+  uint32_t remote_rkey = 0;
+  if (remote.qp) {
+    // Bind a Type 1 MW on remote.
+    ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_1);
+    ASSERT_THAT(mw, NotNull());
+    ASSERT_THAT(verbs_util::ExecuteType1MwBind(remote.qp, mw,
+                                               remote.buffer.span(), remote.mr),
+                IsOkAndHolds(IBV_WC_SUCCESS));
+    remote_rkey = mw->rkey;
+  }
+  synchronise();
+  auto remote_rkey_str = swap_data(std::to_string(remote_rkey));
+  if (local.qp) {
+    std::stringstream(remote_rkey_str) >> remote_rkey;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, remote_rkey);
+    verbs_util::PostSend(local.qp, read);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_THAT(local.buffer.span(), Each(kRemoteBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_THAT(local.buffer.span(), Each(kRemoteBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, Type2MWRead) {
@@ -1285,288 +1549,363 @@ TEST_F(Peer2PeerRcQpTest, Type2MWRead) {
   }
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  // Bind a Type 2 MW on remote.
-  static constexpr uint32_t rkey = 0xBA;
-  ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_2);
-  ASSERT_THAT(mw, NotNull());
-  ASSERT_THAT(verbs_util::ExecuteType2MwBind(
-                  remote.qp, mw, remote.buffer.span(), rkey, remote.mr),
-              IsOkAndHolds(IBV_WC_SUCCESS));
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr read = verbs_util::CreateReadWr(/*wr_id=*/1, &sge, /*num_sge=*/1,
-                                              remote.buffer.data(), mw->rkey);
-  verbs_util::PostSend(local.qp, read);
+  uint32_t remote_rkey = 0;
+  if (remote.qp) {
+    // Bind a Type 2 MW on remote.
+    static constexpr uint32_t rkey = 0xBA;
+    ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_2);
+    ASSERT_THAT(mw, NotNull());
+    ASSERT_THAT(verbs_util::ExecuteType2MwBind(
+                    remote.qp, mw, remote.buffer.span(), rkey, remote.mr),
+                IsOkAndHolds(IBV_WC_SUCCESS));
+    remote_rkey = mw->rkey;
+  }
+  synchronise();
+  auto remote_rkey_str = swap_data(std::to_string(remote_rkey));
+  if (local.qp) {
+    std::stringstream(remote_rkey_str) >> remote_rkey;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, remote_rkey);
+    verbs_util::PostSend(local.qp, read);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_THAT(local.buffer.span(), Each(kRemoteBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_THAT(local.buffer.span(), Each(kRemoteBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, Type1MWUnbind) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  // Bind a Type 1 MW on remote.
-  ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_1);
-  ASSERT_THAT(mw, NotNull());
-  ASSERT_THAT(verbs_util::ExecuteType1MwBind(remote.qp, mw,
-                                             remote.buffer.span(), remote.mr),
-              IsOkAndHolds(IBV_WC_SUCCESS));
-  // Rebind to get a new rkey.
-  uint32_t original_rkey = mw->rkey;
-  ASSERT_THAT(verbs_util::ExecuteType1MwBind(remote.qp, mw,
-                                             remote.buffer.span(), remote.mr),
-              IsOkAndHolds(IBV_WC_SUCCESS));
-  EXPECT_NE(original_rkey, mw->rkey);
+  uint32_t second_rkey = 0, original_rkey = 0;
+  if (remote.qp) {
+    // Bind a Type 1 MW on remote.
+    ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_1);
+    ASSERT_THAT(mw, NotNull());
+    ASSERT_THAT(verbs_util::ExecuteType1MwBind(remote.qp, mw,
+                                               remote.buffer.span(), remote.mr),
+                IsOkAndHolds(IBV_WC_SUCCESS));
+    // Rebind to get a new rkey.
+    original_rkey = mw->rkey;
+    ASSERT_THAT(verbs_util::ExecuteType1MwBind(remote.qp, mw,
+                                               remote.buffer.span(), remote.mr),
+                IsOkAndHolds(IBV_WC_SUCCESS));
+    EXPECT_NE(original_rkey, mw->rkey);
+    second_rkey = mw->rkey;
+  }
+  synchronise();
+  auto remote_rkey_str = swap_data(std::to_string(second_rkey) + " " +
+                                   std::to_string(original_rkey));
+  if (local.qp) {
+    // We already have the right values on the remote end
+    std::stringstream(remote_rkey_str) >> second_rkey >> original_rkey;
+    // Issue a read with the new rkey.
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), second_rkey);
+    verbs_util::PostSend(local.qp, read);
 
-  // Issue a read with the new rkey.
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr read = verbs_util::CreateReadWr(/*wr_id=*/1, &sge, /*num_sge=*/1,
-                                              remote.buffer.data(), mw->rkey);
-  verbs_util::PostSend(local.qp, read);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_THAT(local.buffer.span(), Each(kRemoteBufferContent));
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_THAT(local.buffer.span(), Each(kRemoteBufferContent));
-
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_ACCESS_ERR;
-  // Issue a read with the old rkey.
-  read.wr.rdma.rkey = original_rkey;
-  verbs_util::PostSend(local.qp, read);
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.status, expected);
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_ACCESS_ERR;
+    // Issue a read with the old rkey.
+    read.wr.rdma.rkey = original_rkey;
+    verbs_util::PostSend(local.qp, read);
+    ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.status, expected);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, ReadInvalidLkey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  // Change lkey to be invalid.
-  sge.lkey = (sge.lkey + 10) * 5;
-  ibv_send_wr read = verbs_util::CreateReadWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  verbs_util::PostSend(local.qp, read);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    // Change lkey to be invalid.
+    sge.lkey = (sge.lkey + 10) * 5;
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    verbs_util::PostSend(local.qp, read);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
-  // Existing hardware does not set this on error.
-  // EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  // Verify buffer is unchanged.
-  EXPECT_THAT(local.buffer.span(), Each(kLocalBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    // Existing hardware does not set this on error.
+    // EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    // Verify buffer is unchanged.
+    EXPECT_THAT(local.buffer.span(), Each(kLocalBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, UnsignaledReadError) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  // Change lkey to be invalid.
-  sge.lkey = (sge.lkey + 10) * 5;
-  ibv_send_wr read = verbs_util::CreateReadWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  read.send_flags = read.send_flags & ~IBV_SEND_SIGNALED;
-  verbs_util::PostSend(local.qp, read);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    // Change lkey to be invalid.
+    sge.lkey = (sge.lkey + 10) * 5;
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    read.send_flags = read.send_flags & ~IBV_SEND_SIGNALED;
+    verbs_util::PostSend(local.qp, read);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
-  // Existing hardware does not set this on error.
-  // EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    // Existing hardware does not set this on error.
+    // EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, ReadInvalidRkey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr read = verbs_util::CreateReadWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  // Change rkey to be invalid.
-  read.wr.rdma.rkey = (read.wr.rdma.rkey + 10) * 5;
-  verbs_util::PostSend(local.qp, read);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    // Change rkey to be invalid.
+    read.wr.rdma.rkey = (read.wr.rdma.rkey + 10) * 5;
+    verbs_util::PostSend(local.qp, read);
 
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_ACCESS_ERR;
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, expected);
-  // Existing hardware does not set this on error.
-  // EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  // Verify buffer is unchanged.
-  EXPECT_THAT(local.buffer.span(), Each(kLocalBufferContent));
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_ACCESS_ERR;
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, expected);
+    // Existing hardware does not set this on error.
+    // EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    // Verify buffer is unchanged.
+    EXPECT_THAT(local.buffer.span(), Each(kLocalBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, ReadInvalidRKeyAndInvalidLKey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  // Invalidate the lkey.
-  sge.lkey = (sge.lkey + 10) * 5;
-  ibv_send_wr read = verbs_util::CreateReadWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  // Invalidate the rkey too.
-  read.wr.rdma.rkey = (read.wr.rdma.rkey + 10) * 5;
-  verbs_util::PostSend(local.qp, read);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    // Invalidate the lkey.
+    sge.lkey = (sge.lkey + 10) * 5;
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    // Invalidate the rkey too.
+    read.wr.rdma.rkey = (read.wr.rdma.rkey + 10) * 5;
+    verbs_util::PostSend(local.qp, read);
 
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_ACCESS_ERR;
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, expected);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_THAT(local.buffer.span(), Each(kLocalBufferContent));
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_ACCESS_ERR;
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_THAT(local.buffer.span(), Each(kLocalBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, BadReadAddrLocal) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
 
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  --sge.addr;
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    --sge.addr;
 
-  ibv_send_wr read = verbs_util::CreateReadWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  verbs_util::PostSend(local.qp, read);
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    verbs_util::PostSend(local.qp, read);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
 
-  EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+  if (remote.qp) {
+    EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+    EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_RTS);
+  }
+  synchronise();
 
   /* Ensure local QP has moved to error state */
-  EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
-  EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_RTS);
+  if (local.qp) {
+    EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+  }
 }
 
 TEST_F(Peer2PeerRcQpTest, BadReadAddrRemote) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
 
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr read = verbs_util::CreateReadWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data() - 32,
-      remote.mr->rkey);
-  verbs_util::PostSend(local.qp, read);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, (uint8_t*)local.remote.addr - 32,
+        local.remote.rkey);
+    verbs_util::PostSend(local.qp, read);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
 
-  EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+  if (remote.qp) {
+    EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+    EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
+  }
+  synchronise();
 
   /* Ensure both QPs have moved to error state */
-  EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
-  EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
+  if (local.qp) {
+    EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, BasicWrite) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  verbs_util::PostSend(local.qp, write);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    verbs_util::PostSend(local.qp, write);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, BasicWriteLargePayload) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote),
                        CreateConnectedClientsPair(kLargePayloadPages));
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  verbs_util::PostSend(local.qp, write);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    verbs_util::PostSend(local.qp, write);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, UnsignaledWrite) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  write.send_flags = write.send_flags & ~IBV_SEND_SIGNALED;
-  verbs_util::PostSend(local.qp, write);
-  write.wr_id = 2;
-  write.send_flags = write.send_flags | IBV_SEND_SIGNALED;
-  verbs_util::PostSend(local.qp, write);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    write.send_flags = write.send_flags & ~IBV_SEND_SIGNALED;
+    verbs_util::PostSend(local.qp, write);
+    write.wr_id = 2;
+    write.send_flags = write.send_flags | IBV_SEND_SIGNALED;
+    verbs_util::PostSend(local.qp, write);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 2);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 2);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, WriteInlineData) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
   const size_t kWriteSize = 36;
-  ASSERT_GE(remote.buffer.size(), kWriteSize) << "receiver buffer too small";
-  // a vector which is not registered to pd or mr
-  auto data_src = std::make_unique<std::vector<uint8_t>>(kWriteSize);
-  std::fill(data_src->begin(), data_src->end(), 'c');
+  if (local.qp) {
+    ASSERT_GE(local.remote.size, kWriteSize) << "receiver buffer too small";
+    // a vector which is not registered to pd or mr
+    auto data_src = std::make_unique<std::vector<uint8_t>>(kWriteSize);
+    std::fill(data_src->begin(), data_src->end(), 'c');
 
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  sge.addr = reinterpret_cast<uint64_t>(data_src->data());
-  sge.length = kWriteSize;
-  sge.lkey = 0xDEADBEEF;  // random bad keys
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  write.send_flags |= IBV_SEND_INLINE;
-  verbs_util::PostSend(local.qp, write);
-  (*data_src)[0] = kLocalBufferContent;  // source can be modified immediately
-  data_src.reset();  // src buffer can be deleted immediately after post_send()
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    sge.addr = reinterpret_cast<uint64_t>(data_src->data());
+    sge.length = kWriteSize;
+    sge.lkey = 0xDEADBEEF;  // random bad keys
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    write.send_flags |= IBV_SEND_INLINE;
+    verbs_util::PostSend(local.qp, write);
+    (*data_src)[0] = kLocalBufferContent;  // source can be modified immediately
+    data_src
+        .reset();  // src buffer can be deleted immediately after post_send()
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_THAT(absl::MakeSpan(remote.buffer.data(), kWriteSize), Each('c'));
-  EXPECT_THAT(absl::MakeSpan(remote.buffer.data() + kWriteSize,
-                             remote.buffer.data() + remote.buffer.size()),
-              Each(kRemoteBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    EXPECT_THAT(absl::MakeSpan(remote.buffer.data(), kWriteSize), Each('c'));
+    EXPECT_THAT(absl::MakeSpan(remote.buffer.data() + kWriteSize,
+                               remote.buffer.data() + remote.buffer.size()),
+                Each(kRemoteBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, WriteZeroByteWithImmData) {
@@ -1580,43 +1919,53 @@ TEST_F(Peer2PeerRcQpTest, WriteZeroByteWithImmData) {
       ibv_.AllocAlignedBuffer(/*pages=*/1).subblock(0, kDummyBufSize);
   ASSERT_EQ(kDummyBufSize, dummy_buf.size());
   memset(dummy_buf.data(), 'd', dummy_buf.size());
-  ibv_mr* dummy_mr = ibv_.RegMr(remote.pd, dummy_buf);
+  if (remote.qp) {
+    ibv_mr* dummy_mr = ibv_.RegMr(remote.pd, dummy_buf);
 
-  // WRITE_WITH_IMM requires a RR. Use the dummy buf for sg_list.
-  ibv_sge rsge = verbs_util::CreateSge(dummy_buf.span(), dummy_mr);
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+    // WRITE_WITH_IMM requires a RR. Use the dummy buf for sg_list.
+    ibv_sge rsge = verbs_util::CreateSge(dummy_buf.span(), dummy_mr);
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  synchronise();
 
-  // Post zero sge write to remote.buffer.
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, nullptr, /*num_sge=*/0, remote.buffer.data(),
-      remote.mr->rkey);
-  write.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
-  write.imm_data = kImm;
-  verbs_util::PostSend(local.qp, write);
+  if (local.qp) {
+    // Post zero sge write to remote.buffer.
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, nullptr, /*num_sge=*/0, local.remote.addr,
+        local.remote.rkey);
+    write.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+    write.imm_data = kImm;
+    verbs_util::PostSend(local.qp, write);
 
-  // Verify WRITE completion.
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
+    // Verify WRITE completion.
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
 
-  // Verify RECV completion.
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RECV_RDMA_WITH_IMM);
-  EXPECT_EQ(completion.byte_len, 0);
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
-  EXPECT_NE(completion.wc_flags & IBV_WC_WITH_IMM, 0);
-  EXPECT_EQ(completion.imm_data, kImm);
+  if (remote.qp) {
+    // Verify RECV completion.
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RECV_RDMA_WITH_IMM);
+    EXPECT_EQ(completion.byte_len, 0);
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    EXPECT_NE(completion.wc_flags & IBV_WC_WITH_IMM, 0);
+    EXPECT_EQ(completion.imm_data, kImm);
 
-  // Verify that data written to the correct buffer.
-  EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
-  EXPECT_THAT(dummy_buf.span(), Each('d'));
+    // Verify that data written to the correct buffer.
+    EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
+    EXPECT_THAT(dummy_buf.span(), Each('d'));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, WriteImmData) {
@@ -1630,46 +1979,56 @@ TEST_F(Peer2PeerRcQpTest, WriteImmData) {
       ibv_.AllocAlignedBuffer(/*pages=*/1).subblock(0, kDummyBufSize);
   ASSERT_EQ(kDummyBufSize, dummy_buf.size());
   memset(dummy_buf.data(), 'd', dummy_buf.size());
-  ibv_mr* dummy_mr = ibv_.RegMr(remote.pd, dummy_buf);
+  if (remote.qp) {
+    ibv_mr* dummy_mr = ibv_.RegMr(remote.pd, dummy_buf);
 
-  // WRITE_WITH_IMM requires a RR. Use the dummy buf for sg_list.
-  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
-  rsge.addr = reinterpret_cast<uint64_t>(dummy_buf.data());
-  rsge.length = dummy_buf.size();
-  rsge.lkey = dummy_mr->lkey;
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
-  verbs_util::PostRecv(remote.qp, recv);
+    // WRITE_WITH_IMM requires a RR. Use the dummy buf for sg_list.
+    ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+    rsge.addr = reinterpret_cast<uint64_t>(dummy_buf.data());
+    rsge.length = dummy_buf.size();
+    rsge.lkey = dummy_mr->lkey;
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  synchronise();
 
-  // Post write to remote.buffer.
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  write.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
-  write.imm_data = kImm;
-  verbs_util::PostSend(local.qp, write);
+  if (local.qp) {
+    // Post write to remote.buffer.
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    write.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+    write.imm_data = kImm;
+    verbs_util::PostSend(local.qp, write);
 
-  // Verify WRITE completion.
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
+    // Verify WRITE completion.
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
 
-  // Verify RECV completion.
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RECV_RDMA_WITH_IMM);
-  EXPECT_EQ(completion.byte_len, local.buffer.size());
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
-  EXPECT_NE(completion.wc_flags & IBV_WC_WITH_IMM, 0);
-  EXPECT_EQ(kImm, completion.imm_data);
+  if (remote.qp) {
+    // Verify RECV completion.
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RECV_RDMA_WITH_IMM);
+    EXPECT_EQ(completion.byte_len, local.buffer.size());
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    EXPECT_NE(completion.wc_flags & IBV_WC_WITH_IMM, 0);
+    EXPECT_EQ(kImm, completion.imm_data);
 
-  // Verify that data written to the correct buffer.
-  EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
-  EXPECT_THAT(dummy_buf.span(), Each('d'));
+    // Verify that data written to the correct buffer.
+    EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+    EXPECT_THAT(dummy_buf.span(), Each('d'));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, WriteImmDataInvalidRKey) {
@@ -1677,30 +2036,40 @@ TEST_F(Peer2PeerRcQpTest, WriteImmDataInvalidRKey) {
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
   const uint32_t kImm = 0xBADDCAFE;
 
-  ibv_recv_wr recv =
-      verbs_util::CreateRecvWr(/*wr_id=*/0, nullptr, /*num_sge=*/0);
-  verbs_util::PostRecv(remote.qp, recv);
+  if (remote.qp) {
+    ibv_recv_wr recv =
+        verbs_util::CreateRecvWr(/*wr_id=*/0, nullptr, /*num_sge=*/0);
+    verbs_util::PostRecv(remote.qp, recv);
+  }
+  synchronise();
 
-  // Post write to remote.buffer.
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(),
-      /*rkey=*/0xDEADBEEF);
-  write.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
-  write.imm_data = kImm;
-  verbs_util::PostSend(local.qp, write);
+  if (local.qp) {
+    // Post write to remote.buffer.
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(),
+        /*rkey=*/0xDEADBEEF);
+    write.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+    write.imm_data = kImm;
+    verbs_util::PostSend(local.qp, write);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
-  EXPECT_THAT(completion.status,
-              AnyOf(IBV_WC_LOC_ACCESS_ERR, IBV_WC_LOC_PROT_ERR));
-  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 0);
-  EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(remote.cq));
+    EXPECT_THAT(completion.status,
+                AnyOf(IBV_WC_LOC_ACCESS_ERR, IBV_WC_LOC_PROT_ERR));
+    EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 0);
+    EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, WriteImmDataRnR) {
@@ -1708,45 +2077,62 @@ TEST_F(Peer2PeerRcQpTest, WriteImmDataRnR) {
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
   const uint32_t kImm = 0xBADDCAFE;
 
-  // Post write to remote.buffer.
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  write.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
-  write.imm_data = kImm;
-  verbs_util::PostSend(local.qp, write);
+  if (local.qp) {
+    // Post write to remote.buffer.
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    write.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+    write.imm_data = kImm;
+    verbs_util::PostSend(local.qp, write);
 
-  // Verify WRITE completion.
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_RNR_RETRY_EXC_ERR;
-  EXPECT_EQ(completion.status, expected);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
+    // Verify WRITE completion.
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_RNR_RETRY_EXC_ERR;
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, Type1MWWrite) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_1);
-  ASSERT_THAT(mw, NotNull());
-  ASSERT_THAT(verbs_util::ExecuteType1MwBind(remote.qp, mw,
-                                             remote.buffer.span(), remote.mr),
-              IsOkAndHolds(IBV_WC_SUCCESS));
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), mw->rkey);
-  verbs_util::PostSend(local.qp, write);
+  uint32_t remote_rkey = 0;
+  if (remote.qp) {
+    ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_1);
+    ASSERT_THAT(mw, NotNull());
+    ASSERT_THAT(verbs_util::ExecuteType1MwBind(remote.qp, mw,
+                                               remote.buffer.span(), remote.mr),
+                IsOkAndHolds(IBV_WC_SUCCESS));
+    remote_rkey = mw->rkey;
+  }
+  synchronise();
+  auto remote_rkey_str = swap_data(std::to_string(remote_rkey));
+  if (local.qp) {
+    std::stringstream(remote_rkey_str) >> remote_rkey;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, remote_rkey);
+    verbs_util::PostSend(local.qp, write);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, Type2MWWrite) {
@@ -1756,210 +2142,289 @@ TEST_F(Peer2PeerRcQpTest, Type2MWWrite) {
   Client local, remote;
   constexpr uint32_t rkey = 0xBA;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_2);
-  ASSERT_THAT(mw, NotNull());
-  ASSERT_THAT(verbs_util::ExecuteType2MwBind(
-                  remote.qp, mw, remote.buffer.span(), rkey, remote.mr),
-              IsOkAndHolds(IBV_WC_SUCCESS));
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), mw->rkey);
-  verbs_util::PostSend(local.qp, write);
+  uint32_t remote_rkey = 0;
+  if (remote.qp) {
+    ibv_mw* mw = ibv_.AllocMw(remote.pd, IBV_MW_TYPE_2);
+    ASSERT_THAT(mw, NotNull());
+    ASSERT_THAT(verbs_util::ExecuteType2MwBind(
+                    remote.qp, mw, remote.buffer.span(), rkey, remote.mr),
+                IsOkAndHolds(IBV_WC_SUCCESS));
+    remote_rkey = mw->rkey;
+  }
+  synchronise();
+  auto remote_rkey_str = swap_data(std::to_string(remote_rkey));
+  if (local.qp) {
+    std::stringstream(remote_rkey_str) >> remote_rkey;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, remote_rkey);
+    verbs_util::PostSend(local.qp, write);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, WriteInvalidLkey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  // Change lkey to be invalid.
-  sge.lkey = (sge.lkey + 10) * 5;
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  verbs_util::PostSend(local.qp, write);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    // Change lkey to be invalid.
+    sge.lkey = (sge.lkey + 10) * 5;
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    verbs_util::PostSend(local.qp, write);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
-  // Existing hardware does not set this on error.
-  // EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  // Verify buffer is unchanged.
-  EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    // Existing hardware does not set this on error.
+    // EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // Verify buffer is unchanged.
+    EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, WriteInvalidRkey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  // Change rkey to be invalid.
-  write.wr.rdma.rkey = (write.wr.rdma.rkey + 10) * 5;
-  verbs_util::PostSend(local.qp, write);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    // Change rkey to be invalid.
+    write.wr.rdma.rkey = (write.wr.rdma.rkey + 10) * 5;
+    verbs_util::PostSend(local.qp, write);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
-  // Existing hardware does not set this on error.
-  // EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  // Verify buffer is unchanged.
-  EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
+    // Existing hardware does not set this on error.
+    // EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // Verify buffer is unchanged.
+    EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, UnsignaledWriteInvalidRkey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  // Change rkey to be invalid.
-  write.wr.rdma.rkey = (write.wr.rdma.rkey + 10) * 5;
-  write.send_flags = write.send_flags & ~IBV_SEND_SIGNALED;
-  verbs_util::PostSend(local.qp, write);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    // Change rkey to be invalid.
+    write.wr.rdma.rkey = (write.wr.rdma.rkey + 10) * 5;
+    write.send_flags = write.send_flags & ~IBV_SEND_SIGNALED;
+    verbs_util::PostSend(local.qp, write);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
-  // Existing hardware does not set this on error.
-  // EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  // Verify buffer is unchanged.
-  EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
+    // Existing hardware does not set this on error.
+    // EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // Verify buffer is unchanged.
+    EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, WriteInvalidRKeyAndInvalidLKey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  // Invalidate the lkey.
-  sge.lkey = (sge.lkey + 10) * 5;
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  // Also invalidate the rkey.
-  write.wr.rdma.rkey = (write.wr.rdma.rkey + 10) * 5;
-  verbs_util::PostSend(local.qp, write);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    // Invalidate the lkey.
+    sge.lkey = (sge.lkey + 10) * 5;
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    // Also invalidate the rkey.
+    write.wr.rdma.rkey = (write.wr.rdma.rkey + 10) * 5;
+    verbs_util::PostSend(local.qp, write);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  // On a write the local key is checked first.
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    // On a write the local key is checked first.
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, BadWriteAddrLocal) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
 
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  --sge.addr;
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  verbs_util::PostSend(local.qp, write);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    --sge.addr;
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    verbs_util::PostSend(local.qp, write);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
 
-  EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+  if (remote.qp) {
+    EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+    EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_RTS);
+  }
+  synchronise();
 
-  /* Ensure local QP has moved to error state */
-  EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
-  EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_RTS);
+  if (local.qp) {
+    /* Ensure local QP has moved to error state */
+    EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, BadWriteAddrRemote) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
 
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr write = verbs_util::CreateWriteWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data() - 32,
-      remote.mr->rkey);
-  verbs_util::PostSend(local.qp, write);
+  if (local.qp) {
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr write = verbs_util::CreateWriteWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, (uint8_t*)local.remote.addr - 32,
+        local.remote.rkey);
+    verbs_util::PostSend(local.qp, write);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_REM_ACCESS_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
+  synchronise();
 
-  EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+  if (remote.qp) {
+    EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+    EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
+  }
+  synchronise();
 
-  /* Ensure both QPs have moved to error state */
-  EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
-  EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
+  if (local.qp) {
+    /* Ensure both QPs have moved to error state */
+    EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, FetchAddInvalidSize) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  // The local SGE will be used to store the value before the update.
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 9;
-  ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey,
-      1);
-  verbs_util::PostSend(local.qp, fetch_add);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  if (completion.status == IBV_WC_SUCCESS) {
-    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-    // The remote should be incremented by 1.
-    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 3);
-    // The local buffer should be the same as the original remote.
-    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 2);
-  } else {
-    EXPECT_THAT(completion.status,
-                AnyOf(IBV_WC_LOC_LEN_ERR, IBV_WC_REM_ACCESS_ERR));
-    // Local and remote buffer should be unchanged.
-    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  int completion_status;
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
   }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    // The local SGE will be used to store the value before the update.
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 9;
+    ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey,
+        1);
+    verbs_util::PostSend(local.qp, fetch_add);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_THAT(completion.status, AnyOf(IBV_WC_SUCCESS, IBV_WC_LOC_LEN_ERR,
+                                         IBV_WC_REM_ACCESS_ERR));
+    if (completion.status == IBV_WC_SUCCESS) {
+      // The local buffer should be the same as the original remote.
+      EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 2);
+    } else {
+      // Local and remote buffer should be unchanged.
+      EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+    }
+    completion_status = completion.status;
+  }
+  synchronise();
+  auto completion_status_str = swap_data(std::to_string(completion_status));
+  if (remote.qp) {
+    std::stringstream(completion_status_str) >> completion_status;
+    if (completion_status == IBV_WC_SUCCESS) {
+      // The remote should be incremented by 1.
+      EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 3);
+    } else {
+      EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+    }
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, FetchAddNoOp) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  // The local SGE will be used to store the value before the update.
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey,
-      0);
-  verbs_util::PostSend(local.qp, fetch_add);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    // The local SGE will be used to store the value before the update.
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey,
+        0);
+    verbs_util::PostSend(local.qp, fetch_add);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    // The local buffer should be the same as the remote.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 2);
+  }
+  synchronise();
 
-  // The remote should remain b/c we added 0.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-  // The local buffer should be the same as the remote.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 2);
+  if (remote.qp) {
+    // The remote should remain b/c we added 0.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+  }
+  synchronise();
 }
 
 // Note: Multiple SGEs for Atomics are specifically not supported by the IBTA
@@ -1970,628 +2435,803 @@ TEST_F(Peer2PeerRcQpTest, FetchAddSplitSgl) {
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
   static constexpr uint64_t kSrcContent = 0xAAAAAAAAAAAAAAAA;
   static constexpr uint64_t kDstContent = 2;
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = kSrcContent;
-  *reinterpret_cast<uint64_t*>((local.buffer.data() + 8)) = kSrcContent;
-  *reinterpret_cast<uint64_t*>((local.buffer.data() + 16)) = kSrcContent;
-  *reinterpret_cast<uint64_t*>((local.buffer.data() + 24)) = kSrcContent;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = kDstContent;
-  // The local SGE will be used to store the value before the update.
-  // Going to read 0x2 from the remote and split it into 2 to store on the local
-  // side:
-  // 0x00 --------
-  // 0x10 xxxx----
-  // 0x20 xxxx----
-  // 0x30 --------
-  ibv_sge sgl[2];
-  sgl[0] = verbs_util::CreateSge(local.buffer.subspan(8, 4), local.mr);
-  sgl[1] = verbs_util::CreateSge(local.buffer.subspan(16, 4), local.mr);
-  static constexpr uint64_t kIncrementAmount = 15;
-  ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
-      /*wr_id=*/1, sgl, /*num_sge=*/2, remote.buffer.data(), remote.mr->rkey,
-      kIncrementAmount);
-  ibv_send_wr* bad_wr = nullptr;
-  int result =
-      ibv_post_send(local.qp, const_cast<ibv_send_wr*>(&fetch_add), &bad_wr);
-  // Some NICs do not allow 2 SG entries
-  if (result) return;
-
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  if (completion.status == IBV_WC_SUCCESS) {
-    // Check destination.
-    uint64_t value = *reinterpret_cast<uint64_t*>(remote.buffer.data());
-    EXPECT_EQ(value, kDstContent + kIncrementAmount);
-    // Check source.
-    value = *reinterpret_cast<uint64_t*>(local.buffer.data());
-    EXPECT_EQ(value, kSrcContent);
-    value = *reinterpret_cast<uint64_t*>(local.buffer.data() + 8);
-    uint64_t fetched = kDstContent;
-    uint64_t expected = kSrcContent;
-    memcpy(&expected, &fetched, 4);
-    EXPECT_EQ(value, expected);
-    value = *reinterpret_cast<uint64_t*>(local.buffer.data() + 16);
-    expected = kSrcContent;
-    memcpy(&expected, reinterpret_cast<uint8_t*>(&fetched) + 4, 4);
-    EXPECT_EQ(value, expected);
-    value = *reinterpret_cast<uint64_t*>(local.buffer.data() + 24);
-    EXPECT_EQ(value, kSrcContent);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = kDstContent;
   }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = kSrcContent;
+    *reinterpret_cast<uint64_t*>((local.buffer.data() + 8)) = kSrcContent;
+    *reinterpret_cast<uint64_t*>((local.buffer.data() + 16)) = kSrcContent;
+    *reinterpret_cast<uint64_t*>((local.buffer.data() + 24)) = kSrcContent;
+
+    // The local SGE will be used to store the value before the update.
+    // Going to read 0x2 from the remote and split it into 2 to store on the
+    // local side: 0x00 -------- 0x10 xxxx---- 0x20 xxxx---- 0x30 --------
+    ibv_sge sgl[2];
+    sgl[0] = verbs_util::CreateSge(local.buffer.subspan(8, 4), local.mr);
+    sgl[1] = verbs_util::CreateSge(local.buffer.subspan(16, 4), local.mr);
+    static constexpr uint64_t kIncrementAmount = 15;
+    ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
+        /*wr_id=*/1, sgl, /*num_sge=*/2, local.remote.addr, local.remote.rkey,
+        kIncrementAmount);
+    ibv_send_wr* bad_wr = nullptr;
+    int result =
+        ibv_post_send(local.qp, const_cast<ibv_send_wr*>(&fetch_add), &bad_wr);
+    // Some NICs do not allow 2 SG entries
+    if (result) return;
+
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    if (completion.status == IBV_WC_SUCCESS) {
+      // Check destination.
+      uint64_t value = *reinterpret_cast<uint64_t*>(remote.buffer.data());
+      EXPECT_EQ(value, kDstContent + kIncrementAmount);
+      // Check source.
+      value = *reinterpret_cast<uint64_t*>(local.buffer.data());
+      EXPECT_EQ(value, kSrcContent);
+      value = *reinterpret_cast<uint64_t*>(local.buffer.data() + 8);
+      uint64_t fetched = kDstContent;
+      uint64_t expected = kSrcContent;
+      memcpy(&expected, &fetched, 4);
+      EXPECT_EQ(value, expected);
+      value = *reinterpret_cast<uint64_t*>(local.buffer.data() + 16);
+      expected = kSrcContent;
+      memcpy(&expected, reinterpret_cast<uint8_t*>(&fetched) + 4, 4);
+      EXPECT_EQ(value, expected);
+      value = *reinterpret_cast<uint64_t*>(local.buffer.data() + 24);
+      EXPECT_EQ(value, kSrcContent);
+    }
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, UnsignaledFetchAdd) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  // The local SGE will be used to store the value before the update.
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey,
-      10);
-  fetch_add.send_flags = fetch_add.send_flags & ~IBV_SEND_SIGNALED;
-  verbs_util::PostSend(local.qp, fetch_add);
-  ibv_send_wr fetch_add2 = verbs_util::CreateFetchAddWr(
-      /*wr_id=*/2, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey,
-      1);
-  verbs_util::PostSend(local.qp, fetch_add2);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    // The local SGE will be used to store the value before the update.
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey,
+        10);
+    fetch_add.send_flags = fetch_add.send_flags & ~IBV_SEND_SIGNALED;
+    verbs_util::PostSend(local.qp, fetch_add);
+    ibv_send_wr fetch_add2 = verbs_util::CreateFetchAddWr(
+        /*wr_id=*/2, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey,
+        1);
+    verbs_util::PostSend(local.qp, fetch_add2);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 2);
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  // Remote = 2 (orig) + 10 + 1 = 14.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 13);
-  // Local = 2 (orig) + 10 = 12.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 12);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 2);
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    // Local = 2 (orig) + 10 = 12.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 12);
+  }
+  synchronise();
+  if (remote.qp) {
+    // Remote = 2 (orig) + 10 + 1 = 14.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 13);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, FetchAddIncrementBy1) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  // The local SGE will be used to store the value before the update.
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey,
-      /*compare_add=*/1);
-  verbs_util::PostSend(local.qp, fetch_add);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 3);
-  // The local buffer should be the same as the remote before update.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 2);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    // The local SGE will be used to store the value before the update.
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey,
+        /*compare_add=*/1);
+    verbs_util::PostSend(local.qp, fetch_add);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    // The local buffer should be the same as the remote before update.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 2);
+  }
+  synchronise();
+  if (remote.qp) {
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 3);
+  }
 }
 
 // This tests increments by a value that is larger than 32 bits.
 TEST_F(Peer2PeerRcQpTest, FetchAddLargeIncrement) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey,
-      68719476736);
-  verbs_util::PostSend(local.qp, fetch_add);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 68719476738);
-  // The local buffer should be the same as the remote before the add.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 2);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey,
+        68719476736);
+    verbs_util::PostSend(local.qp, fetch_add);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    // The local buffer should be the same as the remote before the add.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 2);
+  }
+  if (remote.qp) {
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())),
+              68719476738);
+  }
 }
 
 TEST_F(Peer2PeerRcQpTest, FetchAddUnaligned) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    // The buffer is always an index in the first half of the 16 byte
+    // vector so we can increment by 1 to get an unaligned address with enough
+    // space.
+    ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, (uint8_t*)local.remote.addr + 1,
+        local.remote.rkey, 1);
+    verbs_util::PostSend(local.qp, fetch_add);
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_INV_REQ_ERR;
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, expected);
 
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  // The buffer is always an index in the first half of the 16 byte
-  // vector so we can increment by 1 to get an unaligned address with enough
-  // space.
-  ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data() + 1,
-      remote.mr->rkey, 1);
-  verbs_util::PostSend(local.qp, fetch_add);
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_INV_REQ_ERR;
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, expected);
-
-  // The buffers should be unmodified.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+    // The buffers should be unmodified.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+  }
 }
 
 TEST_F(Peer2PeerRcQpTest, FetchAddInvalidLKey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  sge.lkey = sge.lkey * 13 + 7;
-  ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey,
-      1);
-  verbs_util::PostSend(local.qp, fetch_add);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    sge.lkey = sge.lkey * 13 + 7;
+    ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey,
+        1);
+    verbs_util::PostSend(local.qp, fetch_add);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
 
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
-  // Some providers will still carry out the add on remote, so remote buffer
-  // might be incremented.
-  EXPECT_THAT(*(reinterpret_cast<uint64_t*>(remote.buffer.data())),
-              AnyOf(2, 3));
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // Some providers will still carry out the add on remote, so remote buffer
+    // might be incremented.
+    EXPECT_THAT(*(reinterpret_cast<uint64_t*>(remote.buffer.data())),
+                AnyOf(2, 3));
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, UnsignaledFetchAddError) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  // There may be a more standard way to corrupt such a key.
-  sge.lkey = sge.lkey * 13 + 7;
-  ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey,
-      1);
-  fetch_add.send_flags = fetch_add.send_flags & ~IBV_SEND_SIGNALED;
-  verbs_util::PostSend(local.qp, fetch_add);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    // There may be a more standard way to corrupt such a key.
+    sge.lkey = sge.lkey * 13 + 7;
+    ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey,
+        1);
+    fetch_add.send_flags = fetch_add.send_flags & ~IBV_SEND_SIGNALED;
+    verbs_util::PostSend(local.qp, fetch_add);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, FetchAddInvalidRKey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  // There may be a more standard way to corrupt such a key.
-  uint32_t corrupted_rkey = remote.mr->rkey * 13 + 7;
-  ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), corrupted_rkey,
-      1);
-  verbs_util::PostSend(local.qp, fetch_add);
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_ACCESS_ERR;
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, expected);
-
-  // The buffers should not have changed.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    // There may be a more standard way to corrupt such a key.
+    uint32_t corrupted_rkey = local.remote.rkey * 13 + 7;
+    ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, corrupted_rkey, 1);
+    verbs_util::PostSend(local.qp, fetch_add);
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_ACCESS_ERR;
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // The buffers should not have changed.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+  }
 }
 
 TEST_F(Peer2PeerRcQpTest, FetchAddInvalidLKeyAndInvalidRKey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  // Corrupt the rkey.
-  uint32_t corrupted_rkey = remote.mr->rkey * 13 + 7;
-  ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), corrupted_rkey,
-      1);
-  // Also corrupt the lkey.
-  sge.lkey = sge.lkey * 13 + 7;
-  verbs_util::PostSend(local.qp, fetch_add);
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_ACCESS_ERR;
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, expected);
-
-  // The buffers should not have changed.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    // Corrupt the rkey.
+    uint32_t corrupted_rkey = local.remote.rkey * 13 + 7;
+    ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, corrupted_rkey, 1);
+    // Also corrupt the lkey.
+    sge.lkey = sge.lkey * 13 + 7;
+    verbs_util::PostSend(local.qp, fetch_add);
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_ACCESS_ERR;
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // The buffers should not have changed.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, FetchAddUnalignedInvalidLKey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  // There may be a more standard way to corrupt such a key.
-  sge.lkey = sge.lkey * 13 + 7;
-  ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data() + 1,
-      remote.mr->rkey, 1);
-  verbs_util::PostSend(local.qp, fetch_add);
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_INV_REQ_ERR;
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  // Our implementation checks the key first. The hardware may check the
-  // alignment first.
-  EXPECT_EQ(completion.status, expected);
-
-  // The buffers should not have changed.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    // There may be a more standard way to corrupt such a key.
+    sge.lkey = sge.lkey * 13 + 7;
+    ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, (uint8_t*)local.remote.addr + 1,
+        local.remote.rkey, 1);
+    verbs_util::PostSend(local.qp, fetch_add);
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_INV_REQ_ERR;
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    // Our implementation checks the key first. The hardware may check the
+    // alignment first.
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // The buffers should not have changed.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, FetchAddUnalignedInvalidRKey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  // There may be a more standard way to corrupt such a key.
-  uint32_t corrupted_rkey = remote.mr->rkey * 13 + 7;
-  ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data() + 1,
-      corrupted_rkey, 1);
-  verbs_util::PostSend(local.qp, fetch_add);
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_INV_REQ_ERR;
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  // Our implementation will check the key first. The hardware may or may not
-  // behave the same way.
-  EXPECT_EQ(completion.status, expected);
-
-  // The buffers should not have changed.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    // There may be a more standard way to corrupt such a key.
+    uint32_t corrupted_rkey = local.remote.rkey * 13 + 7;
+    ibv_send_wr fetch_add = verbs_util::CreateFetchAddWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, (uint8_t*)local.remote.addr + 1,
+        corrupted_rkey, 1);
+    verbs_util::PostSend(local.qp, fetch_add);
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_INV_REQ_ERR;
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    // Our implementation will check the key first. The hardware may or may not
+    // behave the same way.
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // The buffers should not have changed.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, CompareSwapNotEqualNoSwap) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey,
-      1, 3);
-  verbs_util::PostSend(local.qp, cmp_swp);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-
-  // The remote buffer should not have changed because the compare value != 2.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-  // The local buffer should have had the remote value written back even though
-  // the comparison wasn't true.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 2);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey,
+        1, 3);
+    verbs_util::PostSend(local.qp, cmp_swp);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    // The local buffer should have had the remote value written back even
+    // though the comparison wasn't true.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 2);
+  }
+  synchronise();
+  if (remote.qp) {
+    // The remote buffer should not have changed because the compare value != 2.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, CompareSwapEqualWithSwap) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey,
-      2, 3);
-  verbs_util::PostSend(local.qp, cmp_swp);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-
-  // The remote buffer should get updated.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 3);
-  // The local buffer should have had the remote value written back.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 2);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey,
+        2, 3);
+    verbs_util::PostSend(local.qp, cmp_swp);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    // The local buffer should have had the remote value written back.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 2);
+  }
+  synchronise();
+  if (remote.qp) {
+    // The remote buffer should get updated.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 3);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, UnsignaledCompareSwap) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey,
-      2, 3);
-  cmp_swp.send_flags = cmp_swp.send_flags & ~IBV_SEND_SIGNALED;
-  verbs_util::PostSend(local.qp, cmp_swp);
-  cmp_swp =
-      verbs_util::CreateCompSwapWr(/*wr_id=*/1, &sge, /*num_sge=*/1,
-                                   remote.buffer.data(), remote.mr->rkey, 3, 2);
-  cmp_swp.wr_id = 2;
-  verbs_util::PostSend(local.qp, cmp_swp);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey,
+        2, 3);
+    cmp_swp.send_flags = cmp_swp.send_flags & ~IBV_SEND_SIGNALED;
+    verbs_util::PostSend(local.qp, cmp_swp);
+    cmp_swp = verbs_util::CreateCompSwapWr(/*wr_id=*/1, &sge, /*num_sge=*/1,
+                                           local.remote.addr, local.remote.rkey,
+                                           3, 2);
+    cmp_swp.wr_id = 2;
+    verbs_util::PostSend(local.qp, cmp_swp);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 2);
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-
-  // The remote buffer should get updated.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-  // The local buffer should have had the remote value written back.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 3);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 2);
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    // The local buffer should have had the remote value written back.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 3);
+  }
+  synchronise();
+  if (remote.qp) {
+    // The remote buffer should get updated.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, UnsignaledCompareSwapError) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  // Corrupt the lkey.
-  sge.lkey = sge.lkey * 13 + 7;
-  ASSERT_EQ(sge.length, 8U);
-  ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey,
-      2, 3);
-  cmp_swp.send_flags = cmp_swp.send_flags & ~IBV_SEND_SIGNALED;
-  verbs_util::PostSend(local.qp, cmp_swp);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
-
-  // The remote buffer should be updated because the lkey is not eagerly
-  // checked.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 3);
-  // The local buffer should not be updated because of the invalid lkey.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    // Corrupt the lkey.
+    sge.lkey = sge.lkey * 13 + 7;
+    ASSERT_EQ(sge.length, 8U);
+    ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey,
+        2, 3);
+    cmp_swp.send_flags = cmp_swp.send_flags & ~IBV_SEND_SIGNALED;
+    verbs_util::PostSend(local.qp, cmp_swp);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    // The local buffer should not be updated because of the invalid lkey.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // The remote buffer should be updated because the lkey is not eagerly
+    // checked.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 3);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, CompareSwapInvalidLKey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  // Corrupt the lkey.
-  sge.lkey = sge.lkey * 13 + 7;
-  ASSERT_EQ(sge.length, 8U);
-  ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey,
-      2, 3);
-  verbs_util::PostSend(local.qp, cmp_swp);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
-
-  // The remote buffer should be updated because the lkey is not eagerly
-  // checked.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 3);
-  // The local buffer should not be updated because of the invalid lkey.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    // Corrupt the lkey.
+    sge.lkey = sge.lkey * 13 + 7;
+    ASSERT_EQ(sge.length, 8U);
+    ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey,
+        2, 3);
+    verbs_util::PostSend(local.qp, cmp_swp);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    // The local buffer should not be updated because of the invalid lkey.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // The remote buffer should be updated because the lkey is not eagerly
+    // checked.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 3);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, CompareSwapInvalidRKey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  // Corrupt the lkey.
-  ASSERT_EQ(sge.length, 8U);
-  ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(),
-      remote.mr->rkey + 7 * 10, 2, 3);
-  verbs_util::PostSend(local.qp, cmp_swp);
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_ACCESS_ERR;
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, expected);
-
-  // The remote buffer should not have changed because it will be caught by the
-  // invalid rkey.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    // Corrupt the lkey.
+    ASSERT_EQ(sge.length, 8U);
+    ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr,
+        local.remote.rkey + 7 * 10, 2, 3);
+    verbs_util::PostSend(local.qp, cmp_swp);
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_ACCESS_ERR;
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // The remote buffer should not have changed because it will be caught by
+    // the invalid rkey.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, CompareSwapInvalidRKeyAndInvalidLKey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  sge.lkey = sge.lkey * 7 + 10;
-  ASSERT_EQ(sge.length, 8U);
-  ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(),
-      remote.mr->rkey + 7 * 10, 2, 3);
-  verbs_util::PostSend(local.qp, cmp_swp);
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_ACCESS_ERR;
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, expected);
-
-  // The buffers shouldn't change because the rkey will get caught.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    sge.lkey = sge.lkey * 7 + 10;
+    ASSERT_EQ(sge.length, 8U);
+    ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr,
+        local.remote.rkey + 7 * 10, 2, 3);
+    verbs_util::PostSend(local.qp, cmp_swp);
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_ACCESS_ERR;
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // The buffers shouldn't change because the rkey will get caught.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, CompareSwapInvalidSize) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 9), local.mr);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 9), local.mr);
 
-  ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey,
-      2, 3);
-  verbs_util::PostSend(local.qp, cmp_swp);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, IBV_WC_LOC_LEN_ERR);
-
-  // The buffers should not be updated.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+    ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey,
+        2, 3);
+    verbs_util::PostSend(local.qp, cmp_swp);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, IBV_WC_LOC_LEN_ERR);
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // The buffers should not be updated.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, CompareSwapUnaligned) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  // The data gets moved to an invalid location.
-  ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data() + 1,
-      remote.mr->rkey, 2, 3);
-  verbs_util::PostSend(local.qp, cmp_swp);
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_INV_REQ_ERR;
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, expected);
-
-  // No buffers should change because the alignment will get caught.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    // The data gets moved to an invalid location.
+    ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, (uint8_t*)local.remote.addr + 1,
+        local.remote.rkey, 2, 3);
+    verbs_util::PostSend(local.qp, cmp_swp);
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_INV_REQ_ERR;
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // No buffers should change because the alignment will get caught.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, CompareSwapUnalignedInvalidRKey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  // The data gets moved to an invalid location and the rkey is corrupted
-  ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data() + 1,
-      remote.mr->rkey * 10 + 3, 2, 3);
-  verbs_util::PostSend(local.qp, cmp_swp);
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_INV_REQ_ERR;
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, expected);
-
-  // No buffers should change because the alignment will get caught.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    // The data gets moved to an invalid location and the rkey is corrupted
+    ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, (uint8_t*)local.remote.addr + 1,
+        local.remote.rkey * 10 + 3, 2, 3);
+    verbs_util::PostSend(local.qp, cmp_swp);
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_INV_REQ_ERR;
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // No buffers should change because the alignment will get caught.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, CompareSwapUnalignedInvalidLKey) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
-  sge.length = 8;
-  // Corrupt the lkey.
-  sge.lkey = sge.lkey * 10 + 7;
-  ASSERT_EQ(sge.length, 8U);
-  // The data gets moved to an invalid location.
-  ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data() + 1,
-      remote.mr->rkey, 2, 3);
-  verbs_util::PostSend(local.qp, cmp_swp);
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_INV_REQ_ERR;
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, expected);
-
-  // No buffers should change because the alignment will get caught.
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.subspan(0, 8), local.mr);
+    sge.length = 8;
+    // Corrupt the lkey.
+    sge.lkey = sge.lkey * 10 + 7;
+    ASSERT_EQ(sge.length, 8U);
+    // The data gets moved to an invalid location.
+    ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, (uint8_t*)local.remote.addr + 1,
+        local.remote.rkey, 2, 3);
+    verbs_util::PostSend(local.qp, cmp_swp);
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_INV_REQ_ERR;
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+  }
+  synchronise();
+  if (remote.qp) {
+    // No buffers should change because the alignment will get caught.
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
+  }
 }
 
 TEST_F(Peer2PeerRcQpTest, SgePointerChase) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  {
-    // This scope causes the SGE to be cleaned up.
-    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-    ibv_send_wr read =
-        verbs_util::CreateReadWr(/*wr_id=*/1, &sge, /*num_sge=*/1,
-                                 remote.buffer.data(), remote.mr->rkey);
-    verbs_util::PostSend(local.qp, read);
+  if (local.qp) {
+    {
+      // This scope causes the SGE to be cleaned up.
+      ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+      ibv_send_wr read =
+          verbs_util::CreateReadWr(/*wr_id=*/1, &sge, /*num_sge=*/1,
+                                   local.remote.addr, local.remote.rkey);
+      verbs_util::PostSend(local.qp, read);
+    }
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_THAT(local.buffer.span(), Each(kRemoteBufferContent));
   }
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
-  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_READ);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_THAT(local.buffer.span(), Each(kRemoteBufferContent));
+  synchronise();
 }
 
 // Should be qp-fatal under custom transport and roce meaning that the queue
@@ -2599,57 +3239,81 @@ TEST_F(Peer2PeerRcQpTest, SgePointerChase) {
 TEST_F(Peer2PeerRcQpTest, RemoteFatalError) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
-  *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  sge.length = 8;
-  // The data gets moved to an invalid location.
-  ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data() + 1,
-      remote.mr->rkey, 2, 3);
+  if (remote.qp) {
+    *reinterpret_cast<uint64_t*>(remote.buffer.data()) = 2;
+  }
+  synchronise();
+  if (local.qp) {
+    *reinterpret_cast<uint64_t*>(local.buffer.data()) = 1;
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    sge.length = 8;
+    // The data gets moved to an invalid location.
+    ibv_send_wr cmp_swp = verbs_util::CreateCompSwapWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, (uint8_t*)local.remote.addr + 1,
+        local.remote.rkey, 2, 3);
 
-  verbs_util::PostSend(local.qp, cmp_swp);
+    verbs_util::PostSend(local.qp, cmp_swp);
 
-  enum ibv_wc_status expected = Introspection().GeneratesRetryExcOnConnTimeout()
-                                    ? IBV_WC_RETRY_EXC_ERR
-                                    : IBV_WC_REM_INV_REQ_ERR;
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  EXPECT_EQ(completion.status, expected);
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
-  EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+    enum ibv_wc_status expected =
+        Introspection().GeneratesRetryExcOnConnTimeout()
+            ? IBV_WC_RETRY_EXC_ERR
+            : IBV_WC_REM_INV_REQ_ERR;
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    EXPECT_EQ(completion.status, expected);
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(local.buffer.data())), 1);
+    EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+  }
+  synchronise();
+  if (remote.qp) {
+    EXPECT_EQ(*(reinterpret_cast<uint64_t*>(remote.buffer.data())), 2);
 
-  // Both should have transitioned now that the completion has been received.
-  EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
-  EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
+    // Both QPs should have transitioned now that the completion has been
+    // received.
+    EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
 
-  // Reset the buffer values.
-  memset(local.buffer.data(), kLocalBufferContent, local.buffer.size());
-  memset(remote.buffer.data(), kRemoteBufferContent, remote.buffer.size());
+    // Reset the buffer values.
+    memset(remote.buffer.data(), kRemoteBufferContent, remote.buffer.size());
+  }
+  synchronise();
+  if (local.qp) {
+    memset(local.buffer.data(), kLocalBufferContent, local.buffer.size());
 
-  // Create a second WR that should return an error.
-  ibv_sge write_sg = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr write =
-      verbs_util::CreateWriteWr(/*wr_id=*/2, &write_sg, /*num_sge=*/1,
-                                remote.buffer.data(), remote.mr->rkey);
-  write.wr_id = 2;
-  verbs_util::PostSend(local.qp, write);
+    // Create a second WR that should return an error.
+    ibv_sge write_sg = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr write =
+        verbs_util::CreateWriteWr(/*wr_id=*/2, &write_sg, /*num_sge=*/1,
+                                  local.remote.addr, local.remote.rkey);
+    write.wr_id = 2;
+    verbs_util::PostSend(local.qp, write);
 
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(local.cq));
-  // This write should not have landed.
-  EXPECT_EQ(completion.status, IBV_WC_WR_FLUSH_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 2);
-  EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    // This write should not have landed.
+    EXPECT_EQ(completion.status, IBV_WC_WR_FLUSH_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 2);
+  }
+  synchronise();
+  if (remote.qp) {
+    EXPECT_THAT(remote.buffer.span(), Each(kRemoteBufferContent));
 
-  EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
-  EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
-
+    EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_ERR);
+  }
+  synchronise();
   ibv_wc result;
-  EXPECT_EQ(ibv_poll_cq(local.cq, 1, &result), 0);
-  EXPECT_EQ(ibv_poll_cq(remote.cq, 1, &result), 0);
+  if (local.qp) {
+    EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+
+    EXPECT_EQ(ibv_poll_cq(local.cq, 1, &result), 0);
+  }
+  synchronise();
+  if (remote.qp) {
+    EXPECT_EQ(ibv_poll_cq(remote.cq, 1, &result), 0);
+  }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, QueryQpInitialState) {
@@ -2657,11 +3321,16 @@ TEST_F(Peer2PeerRcQpTest, QueryQpInitialState) {
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
   ibv_qp_attr attr;
   ibv_qp_init_attr init_attr;
-  ASSERT_EQ(ibv_query_qp(local.qp, &attr, IBV_QP_STATE, &init_attr), 0);
-  EXPECT_EQ(attr.qp_state, IBV_QPS_RTS);
-
-  ASSERT_EQ(ibv_query_qp(remote.qp, &attr, IBV_QP_STATE, &init_attr), 0);
-  EXPECT_EQ(attr.qp_state, IBV_QPS_RTS);
+  if (local.qp) {
+    ASSERT_EQ(ibv_query_qp(local.qp, &attr, IBV_QP_STATE, &init_attr), 0);
+    EXPECT_EQ(attr.qp_state, IBV_QPS_RTS);
+  }
+  synchronise();
+  if (remote.qp) {
+    ASSERT_EQ(ibv_query_qp(remote.qp, &attr, IBV_QP_STATE, &init_attr), 0);
+    EXPECT_EQ(attr.qp_state, IBV_QPS_RTS);
+  }
+  synchronise();
 }
 
 // A set of testcases for when the remote qp is not in RTS state.
@@ -2803,37 +3472,41 @@ TEST_F(Peer2PeerRcQpTest, WriteBatchedWr) {
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote),
                        CreateConnectedClientsPair(kLargePayloadPages));
 
-  uint32_t batch_size = verbs_util::GetQpCap(local.qp).max_send_wr;
-  uint32_t sge_size = local.buffer.size() / batch_size;
+  if (local.qp) {
+    uint32_t batch_size = verbs_util::GetQpCap(local.qp).max_send_wr;
+    uint32_t sge_size = local.buffer.size() / batch_size;
 
-  // Address in each sge points to buffer of equal size
-  // Offset for each buffer local and remote = wr_id * size, here wr_id = i
-  // Length of each buffer = size
-  // sge[i] is used to create WR write_batch[i]
-  std::vector<ibv_sge> sge(batch_size);
-  std::vector<ibv_send_wr> write_batch(batch_size);
-  for (uint32_t i = 0; i < batch_size; ++i) {
-    sge[i] =
-        verbs_util::CreateSge(local.buffer.subspan(
-                                  /*offset=*/i * sge_size, /*size=*/sge_size),
-                              local.mr);
-    write_batch[i] = verbs_util::CreateWriteWr(
-        /*wr_id=*/i, &sge[i], /*num_sge=*/1,
-        remote.buffer.data() + i * sge_size, remote.mr->rkey);
-    write_batch[i].next = (i != batch_size - 1) ? &write_batch[i + 1] : nullptr;
-  }
+    // Address in each sge points to buffer of equal size
+    // Offset for each buffer local and remote = wr_id * size, here wr_id = i
+    // Length of each buffer = size
+    // sge[i] is used to create WR write_batch[i]
+    std::vector<ibv_sge> sge(batch_size);
+    std::vector<ibv_send_wr> write_batch(batch_size);
+    for (uint32_t i = 0; i < batch_size; ++i) {
+      sge[i] =
+          verbs_util::CreateSge(local.buffer.subspan(
+                                    /*offset=*/i * sge_size, /*size=*/sge_size),
+                                local.mr);
+      write_batch[i] = verbs_util::CreateWriteWr(
+          /*wr_id=*/i, &sge[i], /*num_sge=*/1,
+          (uint8_t*)local.remote.addr + i * sge_size, local.remote.rkey);
+      write_batch[i].next =
+          (i != batch_size - 1) ? &write_batch[i + 1] : nullptr;
+    }
 
-  verbs_util::PostSend(local.qp, write_batch[0]);
+    verbs_util::PostSend(local.qp, write_batch[0]);
 
-  uint32_t completions = 0;
-  while (completions < batch_size) {
-    absl::StatusOr<ibv_wc> completion = verbs_util::WaitForCompletion(local.cq);
-    if (completion.ok()) {
+    uint32_t completions = 0;
+    while (completions < batch_size) {
+      absl::StatusOr<ibv_wc> completion =
+          verbs_util::WaitForCompletion(local.cq);
+      ASSERT_OK(completion);
       EXPECT_EQ(completion->status, IBV_WC_SUCCESS);
       EXPECT_EQ(completion->qp_num, local.qp->qp_num);
       EXPECT_EQ(completion->wr_id, completions++);
     }
   }
+  synchronise();
 }
 
 TEST_F(Peer2PeerRcQpTest, SendRecvBatchedWr) {
@@ -2841,10 +3514,28 @@ TEST_F(Peer2PeerRcQpTest, SendRecvBatchedWr) {
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote),
                        CreateConnectedClientsPair(kLargePayloadPages));
 
-  uint32_t send_queue_size = verbs_util::GetQpCap(local.qp).max_send_wr;
-  uint32_t recv_queue_size = verbs_util::GetQpCap(remote.qp).max_recv_wr;
+  uint32_t send_queue_size = 0;
+  uint32_t recv_queue_size = 0;
+  if (local.qp) {
+    send_queue_size = verbs_util::GetQpCap(local.qp).max_send_wr;
+    std::stringstream(swap_data(std::to_string(send_queue_size))) >>
+        recv_queue_size;
+  }
+  if (remote.qp) {
+    recv_queue_size = verbs_util::GetQpCap(remote.qp).max_recv_wr;
+    std::stringstream(swap_data(std::to_string(recv_queue_size))) >>
+        send_queue_size;
+  }
   uint32_t batch_size = std::min(send_queue_size, recv_queue_size);
-  uint32_t sge_size = local.buffer.size() / batch_size;
+  uint32_t sge_size;
+  if (local.qp) {
+    sge_size = local.buffer.size() / batch_size;
+    swap_data(std::to_string(sge_size));
+  }
+  if (remote.qp) {
+    std::stringstream(swap_data(std::string{})) >> sge_size;
+  }
+  synchronise();
 
   // Address in each sge points to buffer of equal size
   // Offset for each buffer = wr_id * size, here wr_id = i
@@ -2890,11 +3581,10 @@ TEST_F(Peer2PeerRcQpTest, SendRecvBatchedWr) {
     while (send_completions < batch_size) {
       absl::StatusOr<ibv_wc> completion =
           verbs_util::WaitForCompletion(local.cq);
-      if (completion.ok()) {
-        EXPECT_EQ(completion->status, IBV_WC_SUCCESS);
-        EXPECT_EQ(completion->qp_num, local.qp->qp_num);
-        EXPECT_EQ(completion->wr_id, send_completions++);
-      }
+      ASSERT_OK(completion);
+      EXPECT_EQ(completion->status, IBV_WC_SUCCESS);
+      EXPECT_EQ(completion->qp_num, local.qp->qp_num);
+      EXPECT_EQ(completion->wr_id, send_completions++);
     }
   }
   synchronise();
@@ -2902,11 +3592,10 @@ TEST_F(Peer2PeerRcQpTest, SendRecvBatchedWr) {
     while (recv_completions < batch_size) {
       absl::StatusOr<ibv_wc> completion =
           verbs_util::WaitForCompletion(remote.cq);
-      if (completion.ok()) {
-        EXPECT_EQ(completion->status, IBV_WC_SUCCESS);
-        EXPECT_EQ(completion->qp_num, remote.qp->qp_num);
-        EXPECT_EQ(completion->wr_id, recv_completions++);
-      }
+      ASSERT_OK(completion);
+      EXPECT_EQ(completion->status, IBV_WC_SUCCESS);
+      EXPECT_EQ(completion->qp_num, remote.qp->qp_num);
+      EXPECT_EQ(completion->wr_id, recv_completions++);
     }
   }
   synchronise();
@@ -2915,55 +3604,65 @@ TEST_F(Peer2PeerRcQpTest, SendRecvBatchedWr) {
 TEST_F(Peer2PeerRcQpTest, FullSubmissionQueue) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  uint32_t send_queue_size = verbs_util::GetQpCap(local.qp).max_send_wr;
-  if (send_queue_size % 2) {
-    // The test assume local send queue has even size in order to hit its
-    // boundary. If not, we round it down and this test will not hit QP's
-    // boundary.
-    --send_queue_size;
-  }
-  uint32_t batch_size = send_queue_size / 2;
-
-  // Basic Read.
-  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr read = verbs_util::CreateReadWr(
-      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
-  // Submit a batch at a time.
-  std::vector<ibv_send_wr> submissions(batch_size, read);
-  for (uint32_t i = 0; i < batch_size - 1; ++i) {
-    submissions[i].next = &submissions[i + 1];
-  }
-  submissions[batch_size - 1].next = nullptr;
-
-  // At this value we should issue more work.
-  uint32_t target_outstanding = send_queue_size - batch_size;
-  std::vector<ibv_wc> completions(batch_size);
-  uint32_t outstanding = 0;
-  uint32_t total = 0;
-  // Issue 20 batches of work.
-  while (total < batch_size * 20) {
-    if (outstanding <= target_outstanding) {
-      verbs_util::PostSend(local.qp, submissions[0]);
-      outstanding += batch_size;
+  if (local.qp) {
+    uint32_t send_queue_size = verbs_util::GetQpCap(local.qp).max_send_wr;
+    if (send_queue_size % 2) {
+      // The test assume local send queue has even size in order to hit its
+      // boundary. If not, we round it down and this test will not hit QP's
+      // boundary.
+      --send_queue_size;
     }
-    // Wait a little.
-    sched_yield();
-    absl::SleepFor(absl::Milliseconds(20));
-    // Poll completions
-    int count = ibv_poll_cq(local.cq, batch_size, completions.data());
-    total += count;
-    outstanding -= count;
-  }
+    uint32_t batch_size = send_queue_size / 2;
 
-  // Wait for outstanding to avoid any leaks...
-  while (outstanding > 0) {
-    // Wait a little.
-    sched_yield();
-    absl::SleepFor(absl::Milliseconds(20));
-    // Poll completions
-    int count = ibv_poll_cq(local.cq, batch_size, completions.data());
-    outstanding -= count;
+    // Basic Read.
+    ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr read = verbs_util::CreateReadWr(
+        /*wr_id=*/1, &sge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
+    // Submit a batch at a time.
+    std::vector<ibv_send_wr> submissions(batch_size, read);
+    for (uint32_t i = 0; i < batch_size - 1; ++i) {
+      submissions[i].next = &submissions[i + 1];
+    }
+    submissions[batch_size - 1].next = nullptr;
+
+    // At this value we should issue more work.
+    uint32_t target_outstanding = send_queue_size - batch_size;
+    std::vector<ibv_wc> completions(batch_size);
+    uint32_t outstanding = 0;
+    uint32_t total = 0;
+    uint32_t completion_wait_multiplier =
+        absl::GetFlag(FLAGS_completion_wait_multiplier);
+    absl::Time stop =
+        absl::Now() + absl::Seconds(10) * completion_wait_multiplier;
+    // Issue 20 batches of work.
+    while (total < batch_size * 20) {
+      if (outstanding <= target_outstanding) {
+        verbs_util::PostSend(local.qp, submissions[0]);
+        outstanding += batch_size;
+      }
+      // Wait a little.
+      sched_yield();
+      absl::SleepFor(absl::Milliseconds(20));
+      // Poll completions
+      int count = ibv_poll_cq(local.cq, batch_size, completions.data());
+      total += count;
+      outstanding -= count;
+      ASSERT_LT(absl::Now(), stop);
+    }
+
+    stop = absl::Now() + absl::Seconds(10) * completion_wait_multiplier;
+    // Wait for outstanding to avoid any leaks...
+    while (outstanding > 0) {
+      // Wait a little.
+      sched_yield();
+      absl::SleepFor(absl::Milliseconds(20));
+      // Poll completions
+      int count = ibv_poll_cq(local.cq, batch_size, completions.data());
+      outstanding -= count;
+      ASSERT_LT(absl::Now(), stop);
+    }
   }
+  synchronise();
 }
 
 // This test issues 2 reads. The first read has an invalid lkey that will send
@@ -2973,38 +3672,50 @@ TEST_F(Peer2PeerRcQpTest, FlushErrorPollTogether) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
 
-  ibv_sge read_sg = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  read_sg.lkey = read_sg.lkey * 10 + 7;
-  ibv_send_wr read =
-      verbs_util::CreateReadWr(/*wr_id=*/1, &read_sg, /*num_sge=*/1,
-                               remote.buffer.data(), remote.mr->rkey);
-  verbs_util::PostSend(local.qp, read);
+  if (local.qp) {
+    ibv_sge read_sg = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    read_sg.lkey = read_sg.lkey * 10 + 7;
+    ibv_send_wr read =
+        verbs_util::CreateReadWr(/*wr_id=*/1, &read_sg, /*num_sge=*/1,
+                                 local.remote.addr, local.remote.rkey);
+    verbs_util::PostSend(local.qp, read);
 
-  ibv_sge read_sg_2 = verbs_util::CreateSge(local.buffer.span(), local.mr);
-  ibv_send_wr read_2 =
-      verbs_util::CreateWriteWr(/*wr_id=*/1, &read_sg_2, /*num_sge=*/1,
-                                remote.buffer.data(), remote.mr->rkey);
-  read_2.wr_id = 2;
-  verbs_util::PostSend(local.qp, read_2);
+    ibv_sge read_sg_2 = verbs_util::CreateSge(local.buffer.span(), local.mr);
+    ibv_send_wr read_2 =
+        verbs_util::CreateWriteWr(/*wr_id=*/1, &read_sg_2, /*num_sge=*/1,
+                                  local.remote.addr, local.remote.rkey);
+    read_2.wr_id = 2;
+    verbs_util::PostSend(local.qp, read_2);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  // Verify buffer is unchanged.
-  EXPECT_THAT(local.buffer.span(), Each(kLocalBufferContent));
-  EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
-  EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_RTS);
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_PROT_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    // Verify buffer is unchanged.
+    EXPECT_THAT(local.buffer.span(), Each(kLocalBufferContent));
+    EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+  }
+  synchronise();
+  if (remote.qp) {
+    EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_RTS);
+  }
+  synchronise();
+  if (local.qp) {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_WR_FLUSH_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 2);
+    EXPECT_THAT(local.buffer.span(), Each(kLocalBufferContent));
 
-  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_WR_FLUSH_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 2);
-  EXPECT_THAT(local.buffer.span(), Each(kLocalBufferContent));
-
-  EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
-  EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_RTS);
+    EXPECT_EQ(verbs_util::GetQpState(local.qp), IBV_QPS_ERR);
+  }
+  synchronise();
+  if (remote.qp) {
+    EXPECT_EQ(verbs_util::GetQpState(remote.qp), IBV_QPS_RTS);
+  }
+  synchronise();
 }
 
 class RnrRecoverTest

@@ -146,26 +146,44 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
       RETURN_IF_ERROR(ibv_.ModifyRcQpResetToRts(remote.qp, remote.port_attr,
                                                 local.port_attr.gid,
                                                 local.qp->qp_num, qp_attr));
+      local.remote.addr = remote.buffer.data();
+      local.remote.size = remote.buffer.size();
+      local.remote.rkey = remote.mr->rkey;
+      remote.remote.addr = local.buffer.data();
+      remote.remote.size = local.buffer.size();
+      remote.remote.rkey = local.mr->rkey;
     } else if (verbs_util::is_client()) {
       local_host.psn = lrand48() & 0xffffff;
       local_host.gid = local.port_attr.gid;
       local_host.lid = local.port_attr.attr.lid;
       local_host.qpn = local.qp->qp_num;
       local_host.port = local.port_attr.port;
+      local_host.remote_addr = local.buffer.data();
+      local_host.remote_buf_size = local.buffer.size();
+      local_host.rkey = local.mr->rkey;
       verbs_util::RunPeerClient(local_host, remote_host, comm_socket);
       RETURN_IF_ERROR(ibv_.ModifyRcQpResetToRts(
           local.qp, local.port_attr, remote_host.gid, remote_host.qpn,
           remote_host.port, qp_attr));
+      local.remote.addr = remote_host.remote_addr;
+      local.remote.size = remote_host.remote_buf_size;
+      local.remote.rkey = remote_host.rkey;
     } else {
       local_host.psn = lrand48() & 0xffffff;
       local_host.gid = remote.port_attr.gid;
       local_host.lid = remote.port_attr.attr.lid;
       local_host.qpn = remote.qp->qp_num;
       local_host.port = remote.port_attr.port;
+      local_host.remote_addr = remote.buffer.data();
+      local_host.remote_buf_size = remote.buffer.size();
+      local_host.rkey = remote.mr->rkey;
       verbs_util::RunPeerServer(local_host, remote_host, comm_socket);
       RETURN_IF_ERROR(ibv_.ModifyRcQpResetToRts(
           remote.qp, remote.port_attr, remote_host.gid, remote_host.qpn,
           remote_host.port, qp_attr));
+      remote.remote.addr = remote_host.remote_addr;
+      remote.remote.size = remote_host.remote_buf_size;
+      remote.remote.rkey = remote_host.rkey;
     }
 
     return std::make_pair(local, remote);
@@ -461,7 +479,7 @@ TEST_F(Peer2PeerRcQpTest, SendInlineDataInvalidOp) {
 
   // Inline data is only for send and RDMA write. Post a read here.
   ibv_send_wr read = verbs_util::CreateReadWr(
-      /*wr_id=*/1, &lsge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
+      /*wr_id=*/1, &lsge, /*num_sge=*/1, local.remote.addr, local.remote.rkey);
   read.send_flags |= IBV_SEND_INLINE;
   ibv_send_wr* bad_wr;
   // Undefined behavior according to spec.

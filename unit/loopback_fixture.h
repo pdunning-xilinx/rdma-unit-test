@@ -35,6 +35,11 @@ class LoopbackFixture : public RdmaVerbsFixture {
     ibv_qp* qp = nullptr;
     RdmaMemBlock buffer;
     ibv_mr* mr = nullptr;
+    struct {
+      void* addr;
+      size_t size;
+      uint32_t rkey;
+    } remote;
   };
 
   struct BasicSetup {

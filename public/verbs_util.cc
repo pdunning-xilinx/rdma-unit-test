@@ -479,7 +479,8 @@ void SendQpDetails(const conn_attr& host, zmq::socket_t& socket) {
   gid_to_wire_gid(&host.gid, gid);
   // Have to cast host.port to uint32_t because uint8_t prints like a char
   msg << std::hex << host.qpn << " " << host.psn << " " << uint32_t(host.port)
-      << " " << gid;
+      << " " << gid << " " << host.remote_addr << " " << host.remote_buf_size
+      << " " << host.rkey;
   socket.send(zmq::buffer(msg.str()), zmq::send_flags::none);
 }
 
@@ -490,7 +491,8 @@ void RecvQpDetails(conn_attr& host, zmq::socket_t& socket) {
     LOG(FATAL) << "Server: Couldn't read remote QPN";
   } else {
     std::stringstream(reply.to_string()) >> std::hex >> host.qpn >> host.psn >>
-        host.port >> gid;
+        host.port >> gid >> host.remote_addr >> host.remote_buf_size >>
+        host.rkey;
   }
   wire_gid_to_gid(gid, &host.gid);
 }

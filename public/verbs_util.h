@@ -61,6 +61,9 @@ struct conn_attr {
   uint32_t psn;
   union ibv_gid gid;
   uint8_t port;
+  void* remote_addr;
+  size_t remote_buf_size;
+  uint32_t rkey;
 };
 enum class IbvOperations {
   Send,

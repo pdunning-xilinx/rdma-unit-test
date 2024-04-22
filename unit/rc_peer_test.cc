@@ -126,7 +126,7 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
       if (response == msg) {
         break;
       } else if (sync_count == 0 || (last_sync && response != "sync0")) {
-        std::this_thread::sleep_for(500ms);
+        std::this_thread::sleep_for(100ms);
         continue;
       } else {
         sync_count++;

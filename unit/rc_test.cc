@@ -27,6 +27,7 @@
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/flags/flag.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
@@ -36,6 +37,7 @@
 #include "absl/types/span.h"
 #include "infiniband/verbs.h"
 #include "internal/verbs_attribute.h"
+#include "public/flags.h"
 #include "public/introspection.h"
 #include "public/rdma_memblock.h"
 #include "public/status_matchers.h"
@@ -2734,11 +2736,10 @@ TEST_F(LoopbackRcQpTest, WriteBatchedWr) {
   uint32_t completions = 0;
   while (completions < batch_size) {
     absl::StatusOr<ibv_wc> completion = verbs_util::WaitForCompletion(local.cq);
-    if (completion.ok()) {
-      EXPECT_EQ(completion->status, IBV_WC_SUCCESS);
-      EXPECT_EQ(completion->qp_num, local.qp->qp_num);
-      EXPECT_EQ(completion->wr_id, completions++);
-    }
+    ASSERT_OK(completion);
+    EXPECT_EQ(completion->status, IBV_WC_SUCCESS);
+    EXPECT_EQ(completion->qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion->wr_id, completions++);
   }
 }
 
@@ -2794,22 +2795,20 @@ TEST_F(LoopbackRcQpTest, SendRecvBatchedWr) {
     while (send_completions < batch_size) {
       absl::StatusOr<ibv_wc> completion =
           verbs_util::WaitForCompletion(local.cq);
-      if (completion.ok()) {
-        EXPECT_EQ(completion->status, IBV_WC_SUCCESS);
-        EXPECT_EQ(completion->qp_num, local.qp->qp_num);
-        EXPECT_EQ(completion->wr_id, send_completions++);
-      }
+      ASSERT_OK(completion);
+      EXPECT_EQ(completion->status, IBV_WC_SUCCESS);
+      EXPECT_EQ(completion->qp_num, local.qp->qp_num);
+      EXPECT_EQ(completion->wr_id, send_completions++);
     }
   }
   if (!verbs_util::peer_mode() || verbs_util::is_server()) {
     while (recv_completions < batch_size) {
       absl::StatusOr<ibv_wc> completion =
           verbs_util::WaitForCompletion(remote.cq);
-      if (completion.ok()) {
-        EXPECT_EQ(completion->status, IBV_WC_SUCCESS);
-        EXPECT_EQ(completion->qp_num, remote.qp->qp_num);
-        EXPECT_EQ(completion->wr_id, recv_completions++);
-      }
+      ASSERT_OK(completion);
+      EXPECT_EQ(completion->status, IBV_WC_SUCCESS);
+      EXPECT_EQ(completion->qp_num, remote.qp->qp_num);
+      EXPECT_EQ(completion->wr_id, recv_completions++);
     }
   }
 }
@@ -2842,6 +2841,10 @@ TEST_F(LoopbackRcQpTest, FullSubmissionQueue) {
   std::vector<ibv_wc> completions(batch_size);
   uint32_t outstanding = 0;
   uint32_t total = 0;
+  uint32_t completion_wait_multiplier =
+      absl::GetFlag(FLAGS_completion_wait_multiplier);
+  absl::Time stop =
+      absl::Now() + absl::Seconds(10) * completion_wait_multiplier;
   // Issue 20 batches of work.
   while (total < batch_size * 20) {
     if (outstanding <= target_outstanding) {
@@ -2855,8 +2858,10 @@ TEST_F(LoopbackRcQpTest, FullSubmissionQueue) {
     int count = ibv_poll_cq(local.cq, batch_size, completions.data());
     total += count;
     outstanding -= count;
+    ASSERT_LT(absl::Now(), stop);
   }
 
+  stop = absl::Now() + absl::Seconds(10) * completion_wait_multiplier;
   // Wait for outstanding to avoid any leaks...
   while (outstanding > 0) {
     // Wait a little.
@@ -2865,6 +2870,7 @@ TEST_F(LoopbackRcQpTest, FullSubmissionQueue) {
     // Poll completions
     int count = ibv_poll_cq(local.cq, batch_size, completions.data());
     outstanding -= count;
+    ASSERT_LT(absl::Now(), stop);
   }
 }
 

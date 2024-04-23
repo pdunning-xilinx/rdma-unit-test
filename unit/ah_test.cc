@@ -66,6 +66,7 @@ TEST_F(AhTest, CreateAndDestroy) {
 TEST_F(AhTest, DestroyWithInvalidHandle) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ibv_ah* ah = ibv_.extension().CreateAh(setup.pd, setup.simple_ah_attr);
+  ASSERT_THAT(ah, NotNull());
   uint32_t handle = ah->handle;
   ah->handle = 0xDEADBEEF;
   int result = ibv_destroy_ah(ah);

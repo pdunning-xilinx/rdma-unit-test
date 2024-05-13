@@ -235,7 +235,7 @@ TEST_F(MessagingAccessTest, TwoSgeValidAccess) {
 TEST_F(MessagingAccessTest, TwoSgeMixedAccess) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ExecuteTwoSgeTest(setup, kMrAccessAll, kMrAccessAll,
-                    IBV_ACCESS_MW_BIND | IBV_ACCESS_REMOTE_READ, IBV_WC_SUCCESS,
+                    IBV_ACCESS_MW_BIND | IBV_ACCESS_REMOTE_READ, IBV_WC_REM_OP_ERR,
                     IBV_WC_LOC_PROT_ERR);
 }
 

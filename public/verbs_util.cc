@@ -701,6 +701,8 @@ absl::StatusOr<ibv_wc> WaitForCompletion(ibv_cq* cq, absl::Duration timeout) {
   }
   if (count > 0) {
     return result;
+  } else if (count < 0) {
+    return absl::UnknownError(absl::StrCat("ibv_poll_cq returned ", count, ":", strerror(-count)));
   }
   return absl::DeadlineExceededError("Timeout while waiting for a completion.");
 }

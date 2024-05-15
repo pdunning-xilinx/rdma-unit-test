@@ -184,7 +184,7 @@ TEST_P(CqBatchOpTest, WriteSharedCq) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ibv_cq* cq = ibv_.CreateCq(setup.context);
   const int kQueuePairCount = GetParam();
-  const int writes_per_queue_pair = (cq->cqe - 10) / kQueuePairCount;
+  const int writes_per_queue_pair = (verbs_util::kDefaultMaxWr - 10) / kQueuePairCount;
   const int total_completions = writes_per_queue_pair * kQueuePairCount;
   ASSERT_OK_AND_ASSIGN(
       std::vector<QpPair> qp_pairs,
@@ -195,13 +195,13 @@ TEST_P(CqBatchOpTest, WriteSharedCq) {
   WaitForAndVerifyCompletions(cq, total_completions);
 }
 
-// 2 CQs posting recv completions to a single completion queue.
+// 2 QPs posting recv completions to a single completion queue.
 TEST_P(CqBatchOpTest, SendRecvSharedCq) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ibv_cq* send_cq = ibv_.CreateCq(setup.context);
   ibv_cq* recv_cq = ibv_.CreateCq(setup.context);
   const int kQueuePairCount = GetParam();
-  const int sends_per_queue_pair = (recv_cq->cqe - 10) / kQueuePairCount;
+  const int sends_per_queue_pair = (verbs_util::kDefaultMaxWr - 10) / kQueuePairCount;
   const int total_completions = sends_per_queue_pair * kQueuePairCount;
   ASSERT_OK_AND_ASSIGN(
       std::vector<QpPair> qp_pairs,
@@ -223,7 +223,7 @@ TEST_P(CqBatchOpTest, SendWithImmSharedCq) {
   ibv_cq* send_cq = ibv_.CreateCq(setup.context);
   ibv_cq* recv_cq = ibv_.CreateCq(setup.context);
   const int kQueuePairCount = GetParam();
-  const int sends_per_queue_pair = (recv_cq->cqe - 10) / kQueuePairCount;
+  const int sends_per_queue_pair = (verbs_util::kDefaultMaxWr - 10) / kQueuePairCount;
   const int total_completions = sends_per_queue_pair * kQueuePairCount;
   ASSERT_OK_AND_ASSIGN(
       std::vector<QpPair> qp_pairs,
@@ -244,7 +244,7 @@ TEST_P(CqBatchOpTest, ReadSharedCq) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ibv_cq* cq = ibv_.CreateCq(setup.context);
   const int kQueuePairCount = GetParam();
-  const int reads_per_queue_pair = (cq->cqe - 10) / kQueuePairCount;
+  const int reads_per_queue_pair = (verbs_util::kDefaultMaxWr - 10) / kQueuePairCount;
   const int total_completions = reads_per_queue_pair * kQueuePairCount;
   ASSERT_OK_AND_ASSIGN(
       std::vector<QpPair> qp_pairs,
@@ -256,23 +256,26 @@ TEST_P(CqBatchOpTest, ReadSharedCq) {
 }
 
 INSTANTIATE_TEST_SUITE_P(
-    SharedCq, CqBatchOpTest, testing::Values(1, 10, 100),
+    SharedCq, CqBatchOpTest, testing::Values(1, 2, 10, 100),
     [](const testing::TestParamInfo<CqBatchOpTest::ParamType>& info) {
       return absl::StrFormat("%dQps", info.param);
     });
 
-TEST_F(CqBatchOpTest, SendMaxCqeSharedCq) {
+TEST_P(CqBatchOpTest, SendMaxCqeSharedCq) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ibv_cq* send_cq = ibv_.CreateCq(setup.context);
   ibv_cq* recv_cq = ibv_.CreateCq(setup.context);
-  const int sends_per_queue_pair = recv_cq->cqe;
+  const int kQueuePairCount = GetParam();
+  const int sends_per_queue_pair = verbs_util::kDefaultMaxWr / kQueuePairCount;
   const int total_completions = sends_per_queue_pair;
   ASSERT_OK_AND_ASSIGN(
       std::vector<QpPair> qp_pairs,
       CreateTestQpPairs(setup, send_cq, recv_cq, sends_per_queue_pair,
-                        /*QueuePairCount*/ 1));
-  for (int i = 0; i < sends_per_queue_pair; ++i) {
-    QueueRecv(setup, qp_pairs[0]);
+                        kQueuePairCount));
+  for (auto& qp_pair : qp_pairs) {
+    for (int i = 0; i < sends_per_queue_pair; ++i) {
+      QueueRecv(setup, qp_pair);
+    }
   }
   ThreadedSubmission(qp_pairs, sends_per_queue_pair,
                      [&setup, this](QpPair& qp) { QueueSend(setup, qp); });
@@ -280,13 +283,12 @@ TEST_F(CqBatchOpTest, SendMaxCqeSharedCq) {
   WaitForAndVerifyCompletions(send_cq, total_completions);
 }
 
-TEST_F(CqBatchOpTest, SendRecvUdSharedCq) {
+TEST_P(CqBatchOpTest, SendRecvUdSharedCq) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ibv_cq* send_cq = ibv_.CreateCq(setup.context);
   ibv_cq* recv_cq = ibv_.CreateCq(setup.context);
-  const int kQueuePairCount = 2;
-  // max_ah is less than cq->cqe, therefore sends per QP is 10.
-  const int sends_per_queue_pair = 10;
+  const int kQueuePairCount = GetParam();
+  const int sends_per_queue_pair = (verbs_util::kDefaultMaxWr - 10) / kQueuePairCount;
   const int total_completions = sends_per_queue_pair * kQueuePairCount;
   ASSERT_OK_AND_ASSIGN(
       std::vector<QpPair> qp_pairs,

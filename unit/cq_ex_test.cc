@@ -76,10 +76,14 @@ class CqExTest : public RdmaVerbsFixture {
 };
 
 TEST_F(CqExTest, Basic) {
+  constexpr int kCqe = 10;
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
-  ibv_cq_init_attr_ex cq_attr{.cqe = 10};
+  ibv_cq_init_attr_ex cq_attr{.cqe = kCqe};
   ibv_cq_ex* cq = ibv_create_cq_ex(setup.context, &cq_attr);
   ASSERT_THAT(cq, NotNull());
+  EXPECT_EQ(cq->context, setup.context);
+  EXPECT_EQ(cq->channel, nullptr);
+  EXPECT_GE(cq->cqe, kCqe);
   ASSERT_EQ(ibv_destroy_cq(ibv_cq_ex_to_cq(cq)), 0);
 }
 

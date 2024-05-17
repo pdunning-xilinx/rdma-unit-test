@@ -677,7 +677,7 @@ TEST_F(MwType2Test, CrossQpRead) {
       IsOkAndHolds(expected));
 }
 
-TEST_F(MwType2Test, BindType1WhenQpError) {
+TEST_F(MwType2Test, BindType2WhenQpError) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ibv_mr* mr = ibv_.RegMr(setup.pd, setup.buffer);
   ASSERT_OK(ibv_.ModifyQpToError(setup.remote_qp));

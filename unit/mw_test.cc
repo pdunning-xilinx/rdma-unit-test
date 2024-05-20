@@ -989,9 +989,7 @@ TEST_F(MwType2AdvancedTest, OnlyReads) {
   JoinAll(advanced);
 }
 
-// TODO(author2): The test failed on actual hardware. Will need to validate
-// it before re-enabling.
-TEST_F(MwType2AdvancedTest, DISABLED_Rebind) {
+TEST_F(MwType2AdvancedTest, Rebind) {
   ASSERT_OK_AND_ASSIGN(AdvancedSetup advanced, CreateAdvancedSetup());
   absl::Notification cancel_notification;
 
@@ -1006,19 +1004,19 @@ TEST_F(MwType2AdvancedTest, DISABLED_Rebind) {
       /*wr_id=*/1, advanced.mw, advanced.basic.buffer.span(), kRKey + 1,
       advanced.basic.mr);
   verbs_util::PostSend(advanced.owner.qp, bind);
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(advanced.owner.cq));
+  absl::StatusOr<ibv_wc> wrapped_completion = verbs_util::WaitForCompletion(advanced.owner.cq);
+
+  JoinAll(advanced); // Join before asserting to assert cleanly
+
+  ASSERT_OK_AND_ASSIGN(ibv_wc completion, wrapped_completion);
   ASSERT_EQ(completion.status, IBV_WC_SUCCESS);
   ASSERT_EQ(completion.opcode, IBV_WC_BIND_MW);
 
-  JoinAll(advanced);
   LOG(INFO) << "Reader end.";
   VerifyFailure(advanced);
 }
 
-// TODO(author2): The test failed on actual hardware. Will need to validate
-// it before re-enabling.
-TEST_F(MwType2AdvancedTest, DISABLED_Invalidate) {
+TEST_F(MwType2AdvancedTest, Invalidate) {
   ASSERT_OK_AND_ASSIGN(AdvancedSetup advanced, CreateAdvancedSetup());
   absl::Notification cancel_notification;
   std::atomic<size_t> total_reads = 0;
@@ -1031,12 +1029,14 @@ TEST_F(MwType2AdvancedTest, DISABLED_Invalidate) {
   ibv_send_wr* bad_wr;
   ASSERT_EQ(ibv_post_send(advanced.owner.qp, &invalidate, &bad_wr), 0);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(advanced.owner.cq));
+  absl::StatusOr<ibv_wc> wrapped_completion = verbs_util::WaitForCompletion(advanced.owner.cq);
+
+  JoinAll(advanced);
+
+  ASSERT_OK_AND_ASSIGN(ibv_wc completion, wrapped_completion);
   ASSERT_EQ(completion.status, IBV_WC_SUCCESS);
   ASSERT_EQ(completion.opcode, IBV_WC_LOCAL_INV);
 
-  JoinAll(advanced);
   VerifyFailure(advanced);
 }
 
@@ -1048,9 +1048,11 @@ TEST_F(MwType2AdvancedTest, Dealloc) {
                      cancel_notification);
 
   // Delete.
-  ASSERT_EQ(ibv_.DeallocMw(advanced.mw), 0);
+  int dealloc_result = ibv_.DeallocMw(advanced.mw);
 
   JoinAll(advanced);
+
+  ASSERT_EQ(dealloc_result, 0);
   VerifyFailure(advanced);
 }
 

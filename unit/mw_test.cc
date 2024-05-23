@@ -264,7 +264,6 @@ TEST_P(MwGeneralTest, DeregMrWhenBound) {
   int result = ibv_.DeregMr(setup.mr);
   // Some NICs allow deregistering MRs with MW bound.
   if (result == 0) {
-    EXPECT_EQ(0, 1);
     EXPECT_THAT(
         verbs_util::ExecuteRdmaRead(setup.local_qp, setup.buffer.span(),
                                     setup.mr, setup.buffer.data(), mw->rkey),

@@ -602,8 +602,10 @@ TEST_F(QpStateTest, PostRecvReset) {
   ibv_send_wr send =
       verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
   verbs_util::PostSend(setup.local_qp, send);
+  // Wait for 4*(5+1)*1.07 seconds rounded up. 5 retries so 6 timeouts.
+  // 1.07s for the way timeouts are rounded.
   ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(setup.cq));
+                       verbs_util::WaitForCompletion(setup.cq, absl::Seconds(26)));
   EXPECT_EQ(completion.status, IBV_WC_RETRY_EXC_ERR);
   EXPECT_EQ(completion.wr_id, 1);
   EXPECT_EQ(completion.qp_num, setup.local_qp->qp_num);
@@ -662,8 +664,10 @@ TEST_F(QpStateTest, PostRecvInit) {
   ibv_send_wr send =
       verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
   verbs_util::PostSend(setup.local_qp, send);
+  // Wait for 4*(5+1)*1.07 seconds rounded up. 5 retries so 6 timeouts.
+  // 1.07s for the way timeouts are rounded.
   ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(setup.cq));
+                       verbs_util::WaitForCompletion(setup.cq, absl::Seconds(26)));
   EXPECT_EQ(completion.status, IBV_WC_RETRY_EXC_ERR);
   EXPECT_EQ(completion.wr_id, 1);
   EXPECT_EQ(completion.qp_num, setup.local_qp->qp_num);
@@ -968,8 +972,10 @@ TEST_P(ResponderQpStateTest, ResponderNotReadyToReceive) {
   if (!Introspection().BuffersMessagesWhenNotReadyToReceive()) {
     LOG(INFO) << "Provider does not buffer incoming messages. Expecting "
                  "unsuccessful completions.";
+    // Wait for 4*(5+1)*1.07 seconds rounded up. 5 retries so 6 timeouts.
+    // 1.07s for the way timeouts are rounded.
     ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                         verbs_util::WaitForCompletion(requestor.cq));
+                         verbs_util::WaitForCompletion(requestor.cq, absl::Seconds(26)));
     EXPECT_EQ(completion.status, IBV_WC_RETRY_EXC_ERR);
     EXPECT_EQ(completion.wr_id, wr.wr_id);
     EXPECT_EQ(completion.qp_num, requestor.qp->qp_num);

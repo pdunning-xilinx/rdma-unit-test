@@ -269,19 +269,23 @@ TEST_F(QpTest, Modify) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ibv_qp* qp = ibv_.CreateQp(setup.pd, setup.basic_attr);
   ASSERT_THAT(qp, NotNull());
+  EXPECT_EQ(verbs_util::GetQpState(qp), IBV_QPS_RESET);
 
   // Reset -> Init.
   ASSERT_EQ(InitRcQP(qp), 0);
+  EXPECT_EQ(verbs_util::GetQpState(qp), IBV_QPS_INIT);
   // Init -> Ready to receive.
   ibv_qp_attr mod_rtr = QpAttribute().GetRcInitToRtrAttr(
       setup.port_attr.port, setup.port_attr.gid_index, setup.port_attr.gid,
       qp->qp_num);
   int mask_rtr = QpAttribute().GetRcInitToRtrMask();
   ASSERT_EQ(ibv_modify_qp(qp, &mod_rtr, mask_rtr), 0);
+  EXPECT_EQ(verbs_util::GetQpState(qp), IBV_QPS_RTR);
   // Ready to receive -> Ready to send.
   ibv_qp_attr mod_rts = QpAttribute().GetRcRtrToRtsAttr();
   int mask_rts = QpAttribute().GetRcRtrToRtsMask();
   EXPECT_EQ(ibv_modify_qp(qp, &mod_rts, mask_rts), 0);
+  EXPECT_EQ(verbs_util::GetQpState(qp), IBV_QPS_RTS);
 }
 
 TEST_F(QpTest, ModifyInvalidResetToRtrTransition) {

@@ -139,7 +139,7 @@ TEST_P(PdBindTest, MrOnOtherPd) {
   ASSERT_THAT(alternate_pd, NotNull());
   ibv_mr* mr = ibv_.RegMr(alternate_pd, setup.buffer);
   ASSERT_THAT(mr, NotNull());
-  ibv_mw* mw = ibv_.AllocMw(alternate_pd, GetParam());
+  ibv_mw* mw = ibv_.AllocMw(setup.pd, GetParam());
   ASSERT_THAT(mw, NotNull());
   if (GetParam() == IBV_MW_TYPE_1) {
     // Some clients do client side validation on type 1. First check

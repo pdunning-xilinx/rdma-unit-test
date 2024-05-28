@@ -558,7 +558,8 @@ class QpStateTest : public RdmaVerbsFixture {
 // IBTA specs says we posting to a QP in RESET, INIT or RTR state should be
 // be returned with immediate error (see IBTA v1, chapter 10.8.2, c10-96).
 // But a vast majority of the low-level driver deviate from this rule for better
-// performance. Hence here we expect the post to be successful.
+// performance. Hence here we anticipate the post is successful and make
+// assertions in the event it is.
 TEST_F(QpStateTest, PostSendReset) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ASSERT_EQ(verbs_util::GetQpState(setup.local_qp), IBV_QPS_RESET);
@@ -567,7 +568,8 @@ TEST_F(QpStateTest, PostSendReset) {
       /*wr_id=*/1, &sge, /*num_sge=*/1, setup.buffer.data(), setup.mr->rkey);
   ibv_send_wr* bad_wr = nullptr;
   // This deviates from IBTA spec, see comment above the test.
-  EXPECT_THAT(ibv_post_send(setup.local_qp, &read, &bad_wr), 0);
+  if (ibv_post_send(setup.local_qp, &read, &bad_wr))
+    return;
   // Modify the QP to RTS before we poll for completion.
   ASSERT_OK(ibv_.SetUpLoopbackRcQps(setup.remote_qp, setup.local_qp,
                                     setup.port_attr));
@@ -590,7 +592,8 @@ TEST_F(QpStateTest, PostRecvReset) {
   ibv_sge sge = verbs_util::CreateSge(setup.buffer.span(), setup.mr);
   ibv_recv_wr recv = verbs_util::CreateRecvWr(/*wr_id=*/0, &sge, /*num_sge=*/1);
   ibv_recv_wr* bad_wr = nullptr;
-  EXPECT_THAT(ibv_post_recv(setup.remote_qp, &recv, &bad_wr), 0);
+  if (ibv_post_recv(setup.remote_qp, &recv, &bad_wr))
+    return;
   // Modify local_qp to RTS state and post a send request.
   ASSERT_OK(ibv_.ModifyRcQpResetToRts(
       setup.local_qp, setup.port_attr, setup.port_attr.gid,
@@ -618,7 +621,8 @@ TEST_F(QpStateTest, PostSendInit) {
   ibv_send_wr* bad_wr = nullptr;
   // This deviates from IBTA spec, see comment at QpStateTest.PostSendReset
   // for details.
-  EXPECT_THAT(ibv_post_send(setup.local_qp, &read, &bad_wr), 0);
+  if (ibv_post_send(setup.local_qp, &read, &bad_wr))
+    return;
   ASSERT_OK(ibv_.ModifyLoopbackRcQpResetToRts(setup.remote_qp, setup.local_qp,
                                               setup.port_attr));
   // Modify the QP to RTS before we poll for completion.
@@ -681,7 +685,8 @@ TEST_F(QpStateTest, PostSendRtr) {
   ibv_send_wr* bad_wr = nullptr;
   // This deviates from IBTA spec, see comment at QpStateTest.PostSendReset
   // for details.
-  EXPECT_THAT(ibv_post_send(setup.local_qp, &read, &bad_wr), 0);
+  if (ibv_post_send(setup.local_qp, &read, &bad_wr))
+    return;
   ASSERT_OK(ibv_.ModifyLoopbackRcQpResetToRts(setup.remote_qp, setup.local_qp,
                                               setup.port_attr));
   ASSERT_EQ(ibv_.ModifyRcQpRtrToRts(setup.local_qp), 0);

@@ -2977,43 +2977,33 @@ TEST_P(RnrRecoverTest, RnrRecoverTests) {
 
   verbs_util::PostSend(local.qp, lwqe);
 
-  uint32_t i = 0;
   uint32_t cq_polling_tries = 5;
 
-  while (1) {
-    if (i++ == cq_polling_tries) {
-      verbs_util::PostRecv(remote.qp, rwqe);
-      VLOG(1) << "Posted Recv WR";
-    }
+  for (uint32_t i = 0; i < cq_polling_tries; i++) {
+    EXPECT_TRUE(verbs_util::ExpectNoCompletion(local.cq));
+    EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote.cq));
+  }
+  verbs_util::PostRecv(remote.qp, rwqe);
+  VLOG(1) << "Posted Recv WR";
 
-    absl::StatusOr<ibv_wc> lcompletion =
-        verbs_util::WaitForCompletion(local.cq);
-    absl::StatusOr<ibv_wc> rcompletion =
-        verbs_util::WaitForCompletion(remote.cq);
+  ASSERT_OK_AND_ASSIGN(ibv_wc lcompletion,
+      verbs_util::WaitForCompletion(local.cq));
+  ASSERT_OK_AND_ASSIGN(ibv_wc rcompletion,
+      verbs_util::WaitForCompletion(remote.cq));
 
-    if (lcompletion.ok() || rcompletion.ok()) {
-      VLOG(1) << absl::StrCat("Polled CQ try ", i, " - Completion Received.");
+  EXPECT_EQ(lcompletion.status, IBV_WC_SUCCESS);
+  EXPECT_EQ(rcompletion.status, IBV_WC_SUCCESS);
 
-      EXPECT_EQ(lcompletion->status, IBV_WC_SUCCESS);
-      EXPECT_EQ(rcompletion->status, IBV_WC_SUCCESS);
+  EXPECT_EQ(lcompletion.wr_id, 1);
+  EXPECT_EQ(rcompletion.wr_id, 0);
 
-      EXPECT_EQ(lcompletion->wr_id, 1);
-      EXPECT_EQ(rcompletion->wr_id, 0);
+  EXPECT_EQ(lcompletion.qp_num, local.qp->qp_num);
+  EXPECT_EQ(rcompletion.qp_num, remote.qp->qp_num);
 
-      EXPECT_EQ(lcompletion->qp_num, local.qp->qp_num);
-      EXPECT_EQ(rcompletion->qp_num, remote.qp->qp_num);
-
-      if (operation == verbs_util::IbvOperations::SendWithImm ||
-          operation == verbs_util::IbvOperations::WriteWithImm) {
-        EXPECT_NE(rcompletion->wc_flags & IBV_WC_WITH_IMM, 0);
-        EXPECT_EQ(kImm, rcompletion->imm_data);
-      }
-
-      break;
-    } else {
-      VLOG(1) << absl::StrCat("Polled CQ try ", i, " - ")
-              << lcompletion.status();
-    }
+  if (operation == verbs_util::IbvOperations::SendWithImm ||
+      operation == verbs_util::IbvOperations::WriteWithImm) {
+    EXPECT_NE(rcompletion.wc_flags & IBV_WC_WITH_IMM, 0);
+    EXPECT_EQ(kImm, rcompletion.imm_data);
   }
 }
 

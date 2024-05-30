@@ -2634,18 +2634,17 @@ TEST_P(RemoteRcQpStateTest, RemoteRcQpStateTests) {
   ASSERT_OK(BringUpClientQp(remote, param.remote_state, local.port_attr.gid,
                             local.qp->qp_num));
 
+  ASSERT_OK_AND_ASSIGN(ibv_wc_status result, ExecuteRdmaOp(local, remote, param.opcode));
   switch (param.remote_state) {
     case IBV_QPS_RTR:
     case IBV_QPS_RTS:
-      EXPECT_THAT(ExecuteRdmaOp(local, remote, param.opcode), IBV_WC_SUCCESS);
+      EXPECT_EQ(result, IBV_WC_SUCCESS);
       break;
     case IBV_QPS_ERR:
-      EXPECT_THAT(ExecuteRdmaOp(local, remote, param.opcode),
-                  AnyOf(IBV_WC_RETRY_EXC_ERR, IBV_WC_REM_OP_ERR));
+      EXPECT_THAT(result, AnyOf(IBV_WC_RETRY_EXC_ERR, IBV_WC_REM_OP_ERR));
       break;
     default:
-      EXPECT_THAT(ExecuteRdmaOp(local, remote, param.opcode),
-                  IBV_WC_RETRY_EXC_ERR);
+      EXPECT_EQ(result, IBV_WC_RETRY_EXC_ERR);
   }
 }
 

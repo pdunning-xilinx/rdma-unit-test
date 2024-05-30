@@ -1354,7 +1354,7 @@ TEST_F(AdvancedLoopbackTest, RcSendToUd) {
   ASSERT_THAT(remote_qp, NotNull());
   ASSERT_OK(ibv_.ModifyRcQpResetToRts(
       local_qp, setup.port_attr, setup.port_attr.gid, remote_qp->qp_num,
-      QpAttribute().set_timeout(absl::Seconds(1))));
+      QpAttribute().set_timeout(absl::Milliseconds(150))));
   ASSERT_OK(ibv_.ModifyUdQpResetToRts(remote_qp, kQKey));
 
   ibv_sge rsge = verbs_util::CreateSge(
@@ -1369,7 +1369,7 @@ TEST_F(AdvancedLoopbackTest, RcSendToUd) {
       verbs_util::CreateSendWr(/*wr_id=*/0, &lsge, /*num_sge=*/1);
   verbs_util::PostSend(local_qp, send);
   ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local_cq));
+                       verbs_util::WaitForCompletion(local_cq, absl::Seconds(4)));
   EXPECT_EQ(completion.status, IBV_WC_RETRY_EXC_ERR);
   EXPECT_TRUE(verbs_util::ExpectNoCompletion(remote_cq));
 }

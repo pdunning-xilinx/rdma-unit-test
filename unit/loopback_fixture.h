@@ -55,7 +55,8 @@ class LoopbackFixture : public RdmaVerbsFixture {
 
   // Performs one of the four (READ, WRITE, FETCH_ADD, COMP_SWAP) RDMA ops.
   absl::StatusOr<ibv_wc_status> ExecuteRdmaOp(Client& local, Client& remote,
-                                              ibv_wr_opcode op_code);
+                                              ibv_wr_opcode op_code,
+                                              absl::Duration completion_timeout=verbs_util::kDefaultCompletionTimeout);
 
   // Create a client given a specific QP type, memory buffer size and content.
   absl::StatusOr<Client> CreateClient(

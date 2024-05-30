@@ -29,7 +29,7 @@
 namespace rdma_unit_test {
 
 absl::StatusOr<ibv_wc_status> LoopbackFixture::ExecuteRdmaOp(
-    Client& local, Client& remote, ibv_wr_opcode op_code) {
+    Client& local, Client& remote, ibv_wr_opcode op_code, absl::Duration completion_timeout) {
   ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
   ibv_send_wr wr;
   wr.next = nullptr;
@@ -61,7 +61,7 @@ absl::StatusOr<ibv_wc_status> LoopbackFixture::ExecuteRdmaOp(
           absl::StrCat("OpCode ", op_code, " not supported."));
   }
   verbs_util::PostSend(local.qp, wr);
-  ASSIGN_OR_RETURN(ibv_wc completion, verbs_util::WaitForCompletion(local.cq));
+  ASSIGN_OR_RETURN(ibv_wc completion, verbs_util::WaitForCompletion(local.cq, completion_timeout));
   CHECK_EQ(completion.wr_id, 1ul);                // Crash ok
   CHECK_EQ(completion.qp_num, local.qp->qp_num);  // Crash ok
   return completion.status;

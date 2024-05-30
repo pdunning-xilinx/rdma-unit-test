@@ -2586,7 +2586,7 @@ class RemoteRcQpStateTest
   void SetUp() override { LoopbackRcQpTest::SetUp(); }
 
   absl::Status BringUpClientQp(Client& client, ibv_qp_state target_qp_state,
-                               ibv_gid remote_gid, uint32_t remote_qpn) {
+                               ibv_gid remote_gid, uint32_t remote_qpn, uint32_t timeout_ms) {
     if (target_qp_state == IBV_QPS_RESET) {
       return absl::OkStatus();
     }
@@ -2609,7 +2609,7 @@ class RemoteRcQpStateTest
       return absl::OkStatus();
     }
     result_code = ibv_.ModifyRcQpRtrToRts(
-        client.qp, QpAttribute().set_timeout(absl::Seconds(1)));
+        client.qp, QpAttribute().set_timeout(absl::Milliseconds(timeout_ms)));
     if (result_code != 0) {
       return absl::InternalError(absl::StrFormat(
           "Modify QP from RTR to RTS failed (%d)", result_code));
@@ -2630,11 +2630,11 @@ TEST_P(RemoteRcQpStateTest, RemoteRcQpStateTests) {
   ASSERT_OK_AND_ASSIGN(Client local, CreateClient(IBV_QPT_RC));
   ASSERT_OK_AND_ASSIGN(Client remote, CreateClient(IBV_QPT_RC));
   ASSERT_OK(BringUpClientQp(local, IBV_QPS_RTS, remote.port_attr.gid,
-                            remote.qp->qp_num));
+                            remote.qp->qp_num, /*timeout_ms*/150));
   ASSERT_OK(BringUpClientQp(remote, param.remote_state, local.port_attr.gid,
-                            local.qp->qp_num));
+                            local.qp->qp_num, /*timeout_ms*/150));
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc_status result, ExecuteRdmaOp(local, remote, param.opcode));
+  ASSERT_OK_AND_ASSIGN(ibv_wc_status result, ExecuteRdmaOp(local, remote, param.opcode, absl::Seconds(4)));
   switch (param.remote_state) {
     case IBV_QPS_RTR:
     case IBV_QPS_RTS:

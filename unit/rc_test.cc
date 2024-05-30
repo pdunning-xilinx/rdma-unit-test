@@ -2757,21 +2757,6 @@ TEST_F(LoopbackRcQpTest, SendRecvBatchedWr) {
   // length of each buffer = size
   // lsge[i] is used to create WR send_batch[i]
   // Similar batching is done for recv WRs
-  std::vector<ibv_sge> lsge(batch_size);
-  std::vector<ibv_send_wr> send_batch(batch_size);
-  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
-    for (uint32_t i = 0; i < batch_size; ++i) {
-      lsge[i] =
-          verbs_util::CreateSge(local.buffer.subspan(
-                                    /*offset=*/i * sge_size, /*size=*/sge_size),
-                                local.mr);
-      send_batch[i] = verbs_util::CreateSendWr(/*wr_id=*/i, &lsge[i],
-                                               /*num_sge=*/1);
-      send_batch[i].next = (i != batch_size - 1) ? &send_batch[i + 1] : nullptr;
-    }
-    verbs_util::PostSend(local.qp, send_batch[0]);
-  }
-
   std::vector<ibv_sge> rsge(batch_size);
   std::vector<ibv_recv_wr> recv_batch(batch_size);
   if (!verbs_util::peer_mode() || verbs_util::is_server()) {
@@ -2785,6 +2770,21 @@ TEST_F(LoopbackRcQpTest, SendRecvBatchedWr) {
       recv_batch[i].next = (i != batch_size - 1) ? &recv_batch[i + 1] : nullptr;
     }
     verbs_util::PostRecv(remote.qp, recv_batch[0]);
+  }
+
+  std::vector<ibv_sge> lsge(batch_size);
+  std::vector<ibv_send_wr> send_batch(batch_size);
+  if (!verbs_util::peer_mode() || verbs_util::is_client()) {
+    for (uint32_t i = 0; i < batch_size; ++i) {
+      lsge[i] =
+          verbs_util::CreateSge(local.buffer.subspan(
+                                    /*offset=*/i * sge_size, /*size=*/sge_size),
+                                local.mr);
+      send_batch[i] = verbs_util::CreateSendWr(/*wr_id=*/i, &lsge[i],
+                                               /*num_sge=*/1);
+      send_batch[i].next = (i != batch_size - 1) ? &send_batch[i + 1] : nullptr;
+    }
+    verbs_util::PostSend(local.qp, send_batch[0]);
   }
 
   uint32_t send_completions = 0;

@@ -3537,6 +3537,22 @@ TEST_F(Peer2PeerRcQpTest, SendRecvBatchedWr) {
   }
   synchronise();
 
+  std::vector<ibv_sge> rsge(batch_size);
+  std::vector<ibv_recv_wr> recv_batch(batch_size);
+  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
+    for (uint32_t i = 0; i < batch_size; ++i) {
+      rsge[i] =
+          verbs_util::CreateSge(remote.buffer.subspan(
+                                    /*offset=*/i * sge_size, /*size=*/sge_size),
+                                remote.mr);
+      recv_batch[i] = verbs_util::CreateRecvWr(/*wr_id=*/i, &rsge[i],
+                                               /*num_sge=*/1);
+      recv_batch[i].next = (i != batch_size - 1) ? &recv_batch[i + 1] : nullptr;
+    }
+    verbs_util::PostRecv(remote.qp, recv_batch[0]);
+  }
+  synchronise();
+
   // Address in each sge points to buffer of equal size
   // Offset for each buffer = wr_id * size, here wr_id = i
   // length of each buffer = size
@@ -3555,22 +3571,6 @@ TEST_F(Peer2PeerRcQpTest, SendRecvBatchedWr) {
       send_batch[i].next = (i != batch_size - 1) ? &send_batch[i + 1] : nullptr;
     }
     verbs_util::PostSend(local.qp, send_batch[0]);
-  }
-  synchronise();
-
-  std::vector<ibv_sge> rsge(batch_size);
-  std::vector<ibv_recv_wr> recv_batch(batch_size);
-  if (!verbs_util::peer_mode() || verbs_util::is_server()) {
-    for (uint32_t i = 0; i < batch_size; ++i) {
-      rsge[i] =
-          verbs_util::CreateSge(remote.buffer.subspan(
-                                    /*offset=*/i * sge_size, /*size=*/sge_size),
-                                remote.mr);
-      recv_batch[i] = verbs_util::CreateRecvWr(/*wr_id=*/i, &rsge[i],
-                                               /*num_sge=*/1);
-      recv_batch[i].next = (i != batch_size - 1) ? &recv_batch[i + 1] : nullptr;
-    }
-    verbs_util::PostRecv(remote.qp, recv_batch[0]);
   }
   synchronise();
 

@@ -68,7 +68,7 @@ class HugePageTest : public LoopbackFixture {
     std::getline(procfs, line, '\0');
     int nr_hugepages;
     CHECK(absl::SimpleAtoi(line, &nr_hugepages));
-    return nr_hugepages >= kNumHugepages;
+    return nr_hugepages >= kNumHugepages * 2;
   }
 };
 
@@ -109,6 +109,7 @@ TEST_F(HugePageTest, SendLargeChunk) {
   EXPECT_EQ(completion.opcode, IBV_WC_RECV);
   EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
   EXPECT_EQ(completion.wr_id, 0);
+  LOG(INFO) << "Checking recv buf";
   EXPECT_THAT(recv_buf.span(), Each('a'));
 }
 

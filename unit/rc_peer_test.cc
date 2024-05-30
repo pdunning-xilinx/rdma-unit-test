@@ -3579,23 +3579,19 @@ TEST_F(Peer2PeerRcQpTest, SendRecvBatchedWr) {
 
   if (!verbs_util::peer_mode() || verbs_util::is_client()) {
     while (send_completions < batch_size) {
-      absl::StatusOr<ibv_wc> completion =
-          verbs_util::WaitForCompletion(local.cq);
-      ASSERT_OK(completion);
-      EXPECT_EQ(completion->status, IBV_WC_SUCCESS);
-      EXPECT_EQ(completion->qp_num, local.qp->qp_num);
-      EXPECT_EQ(completion->wr_id, send_completions++);
+      ASSERT_OK_AND_ASSIGN(ibv_wc completion, verbs_util::WaitForCompletion(local.cq));
+      EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+      EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+      EXPECT_EQ(completion.wr_id, send_completions++);
     }
   }
   synchronise();
   if (!verbs_util::peer_mode() || verbs_util::is_server()) {
     while (recv_completions < batch_size) {
-      absl::StatusOr<ibv_wc> completion =
-          verbs_util::WaitForCompletion(remote.cq);
-      ASSERT_OK(completion);
-      EXPECT_EQ(completion->status, IBV_WC_SUCCESS);
-      EXPECT_EQ(completion->qp_num, remote.qp->qp_num);
-      EXPECT_EQ(completion->wr_id, recv_completions++);
+      ASSERT_OK_AND_ASSIGN(ibv_wc completion, verbs_util::WaitForCompletion(remote.cq));
+      EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+      EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+      EXPECT_EQ(completion.wr_id, recv_completions++);
     }
   }
   synchronise();

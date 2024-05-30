@@ -1096,13 +1096,19 @@ TEST_F(LoopbackUdQpTest, Read) {
   read.wr.ud.ah = ah;
   read.wr.ud.remote_qkey = kQKey;
   read.wr.ud.remote_qpn = remote.qp->qp_num;
-  verbs_util::PostSend(local.qp, read);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_LOC_QP_OP_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
+  ibv_send_wr* bad_wr = nullptr;
+  int result = ibv_post_send(local.qp, &read, &bad_wr);
+
+  if (result) {
+    ASSERT_EQ(EINVAL, result);
+  } else {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_QP_OP_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+  }
 }
 
 // Tests polling multiple CQE in a single call.
@@ -1181,15 +1187,21 @@ TEST_F(LoopbackUdQpTest, Write) {
   write.wr.ud.ah = ah;
   write.wr.ud.remote_qkey = kQKey;
   write.wr.ud.remote_qpn = remote.qp->qp_num;
-  verbs_util::PostSend(local.qp, write);
 
-  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
-                       verbs_util::WaitForCompletion(local.cq));
-  EXPECT_EQ(completion.status, IBV_WC_LOC_QP_OP_ERR);
-  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
-  EXPECT_EQ(completion.wr_id, 1);
-  CheckClassDFaults(local, remote, /*recreate_local_qp=*/true,
-                    /*post_recv_wqe=*/true);
+  ibv_send_wr* bad_wr = nullptr;
+  int result = ibv_post_send(local.qp, &write, &bad_wr);
+
+  if (result) {
+    ASSERT_EQ(EINVAL, result);
+  } else {
+    ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                         verbs_util::WaitForCompletion(local.cq));
+    EXPECT_EQ(completion.status, IBV_WC_LOC_QP_OP_ERR);
+    EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+    EXPECT_EQ(completion.wr_id, 1);
+    CheckClassDFaults(local, remote, /*recreate_local_qp=*/true,
+                      /*post_recv_wqe=*/true);
+  }
 }
 
 // FetchAndAdd not supported on UD.

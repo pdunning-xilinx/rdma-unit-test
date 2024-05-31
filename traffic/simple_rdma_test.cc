@@ -44,6 +44,7 @@ class SimpleRdmaTest : public RdmaStressFixture {
   static constexpr int kDefaultOpBytes = 32;
   static constexpr Client::Config kClientConfig{
       .max_op_size = 4096, .max_outstanding_ops_per_qp = 60, .max_qps = 10};
+  void mixed_op_test(int read, int write, int send, int fetch_add, int comp_swap);
 };
 
 TEST_F(SimpleRdmaTest, Write) {
@@ -136,7 +137,7 @@ TEST_F(SimpleRdmaTest, Batching) {
   HaltExecution(target);
 }
 
-TEST_F(SimpleRdmaTest, MixedOpType) {
+void SimpleRdmaTest::mixed_op_test(int read, int write, int send, int fetch_add, int comp_swap) {
   // Create a mixture of 100 Read/Write/Send ops on 10Qpairs, with 1/3
   // proportionality of each op type.
 
@@ -144,23 +145,23 @@ TEST_F(SimpleRdmaTest, MixedOpType) {
       target(/*client_id=*/1, context(), port_attr(), kClientConfig);
   CreateSetUpRcQps(initiator, target, kDefaultLargeQpsPerClient);
 
-  constexpr float kRatio = 1. / 5.;
+  float kRatio = 1. / (float)(read + write + send + fetch_add + comp_swap);
   Config::OperationProfile op_profile;
   op_profile.mutable_rc_op_profile()
       ->mutable_op_type_proportions()
-      ->set_write_proportion(kRatio);
+      ->set_write_proportion(kRatio * write);
   op_profile.mutable_rc_op_profile()
       ->mutable_op_type_proportions()
-      ->set_read_proportion(kRatio);
+      ->set_read_proportion(kRatio * read);
   op_profile.mutable_rc_op_profile()
       ->mutable_op_type_proportions()
-      ->set_send_proportion(kRatio);
+      ->set_send_proportion(kRatio * send);
   op_profile.mutable_rc_op_profile()
       ->mutable_op_type_proportions()
-      ->set_fetch_add_proportion(kRatio);
+      ->set_fetch_add_proportion(kRatio * fetch_add);
   op_profile.mutable_rc_op_profile()
       ->mutable_op_type_proportions()
-      ->set_comp_swap_proportion(kRatio);
+      ->set_comp_swap_proportion(kRatio * comp_swap);
 
   Config::OperationProfile::OpSizeProportion *op_size_proportion =
       op_profile.add_op_size_proportions();
@@ -183,6 +184,26 @@ TEST_F(SimpleRdmaTest, MixedOpType) {
 
   HaltExecution(initiator);
   HaltExecution(target);
+}
+
+TEST_F(SimpleRdmaTest, MixedOpType) {
+  return mixed_op_test(/*read*/1, /*write*/1, /*send*/1, /*fetch_add*/1, /*comp_swap*/1);
+}
+
+TEST_F(SimpleRdmaTest, MixedOpTypeNoAtomic) {
+  return mixed_op_test(/*read*/1, /*write*/1, /*send*/1, /*fetch_add*/0, /*comp_swap*/0);
+}
+
+TEST_F(SimpleRdmaTest, MixedOpTypeReadWrite) {
+  return mixed_op_test(/*read*/1, /*write*/1, /*send*/0, /*fetch_add*/0, /*comp_swap*/0);
+}
+
+TEST_F(SimpleRdmaTest, MixedOpTypeReadSend) {
+  return mixed_op_test(/*read*/1, /*write*/0, /*send*/1, /*fetch_add*/0, /*comp_swap*/0);
+}
+
+TEST_F(SimpleRdmaTest, MixedOpTypeWriteSend) {
+  return mixed_op_test(/*read*/0, /*write*/1, /*send*/1, /*fetch_add*/0, /*comp_swap*/0);
 }
 
 TEST_F(SimpleRdmaTest, MixedOpSize) {

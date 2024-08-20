@@ -290,7 +290,53 @@ TEST_F(LoopbackRcQpTest, SendLargeChunk) {
   EXPECT_THAT(remote.buffer.span(), Each(kLocalBufferContent));
 }
 
-TEST_F(LoopbackRcQpTest, SendInlineData) {
+TEST_F(LoopbackRcQpTest, SendSmallInlineData) {
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
+  const size_t kSendSize = 32;
+  ASSERT_GE(remote.buffer.size(), kSendSize)
+      << "receiver buffer too small";
+
+  ibv_sge rsge = verbs_util::CreateSge(remote.buffer.span(), remote.mr);
+  ibv_recv_wr recv =
+      verbs_util::CreateRecvWr(/*wr_id=*/0, &rsge, /*num_sge=*/1);
+  verbs_util::PostRecv(remote.qp, recv);
+
+  // a vector which is not registered to pd or mr
+  auto data_src = std::make_unique<std::vector<uint8_t>>(kSendSize);
+  std::fill(data_src->begin(), data_src->end(), 'c');
+  ibv_sge lsge{
+      .addr = reinterpret_cast<uint64_t>(data_src->data()),
+      .length = kSendSize,
+      .lkey = 0xDEADBEEF,  // random bad keys
+  };
+  ibv_send_wr send =
+      verbs_util::CreateSendWr(/*wr_id=*/1, &lsge, /*num_sge=*/1);
+  send.send_flags |= IBV_SEND_INLINE;
+  verbs_util::PostSend(local.qp, send);
+  (*data_src)[0] = kLocalBufferContent;  // source can be modified immediately
+  data_src.reset();  // delete the source buffer immediately after post_send()
+
+  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                       verbs_util::WaitForCompletion(local.cq));
+  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+  EXPECT_EQ(completion.opcode, IBV_WC_SEND);
+  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+  EXPECT_EQ(completion.wr_id, 1);
+  ASSERT_OK_AND_ASSIGN(completion, verbs_util::WaitForCompletion(remote.cq));
+  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+  EXPECT_EQ(completion.opcode, IBV_WC_RECV);
+  EXPECT_EQ(completion.byte_len, kSendSize);
+  EXPECT_EQ(completion.qp_num, remote.qp->qp_num);
+  EXPECT_EQ(completion.wr_id, 0);
+  EXPECT_THAT(absl::MakeSpan(remote.buffer.data(), kSendSize),
+              Each('c'));
+  EXPECT_THAT(absl::MakeSpan(remote.buffer.data() + kSendSize,
+                             remote.buffer.data() + remote.buffer.size()),
+              Each(kRemoteBufferContent));
+}
+
+TEST_F(LoopbackRcQpTest, SendLargeInlineData) {
   uint32_t valid_inline_size, invalid_inline_size;
   ASSERT_OK_AND_ASSIGN(std::tie(valid_inline_size, invalid_inline_size),
                        DetermineInlineLimits());
@@ -1445,7 +1491,7 @@ TEST_F(LoopbackRcQpTest, UnsignaledWrite) {
   EXPECT_EQ(completion.wr_id, 2);
 }
 
-TEST_F(LoopbackRcQpTest, WriteInlineData) {
+TEST_F(LoopbackRcQpTest, WriteSmallInlineData) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
   const size_t kWriteSize = 32;
@@ -1473,6 +1519,43 @@ TEST_F(LoopbackRcQpTest, WriteInlineData) {
   EXPECT_EQ(completion.wr_id, 1);
   EXPECT_THAT(absl::MakeSpan(remote.buffer.data(), kWriteSize), Each('c'));
   EXPECT_THAT(absl::MakeSpan(remote.buffer.data() + kWriteSize,
+                             remote.buffer.data() + remote.buffer.size()),
+              Each(kRemoteBufferContent));
+}
+
+TEST_F(LoopbackRcQpTest, WriteLargeInlineData) {
+  uint32_t valid_inline_size, invalid_inline_size;
+  ASSERT_OK_AND_ASSIGN(std::tie(valid_inline_size, invalid_inline_size),
+                       DetermineInlineLimits());
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(
+      std::tie(local, remote),
+      CreateConnectedClientsPair(
+          kPages, QpInitAttribute().set_max_inline_data(valid_inline_size)));
+  ASSERT_GE(remote.buffer.size(), valid_inline_size) << "receiver buffer too small";
+  // a vector which is not registered to pd or mr
+  auto data_src = std::make_unique<std::vector<uint8_t>>(valid_inline_size);
+  std::fill(data_src->begin(), data_src->end(), 'c');
+
+  ibv_sge sge = verbs_util::CreateSge(local.buffer.span(), local.mr);
+  sge.addr = reinterpret_cast<uint64_t>(data_src->data());
+  sge.length = valid_inline_size;
+  sge.lkey = 0xDEADBEEF;  // random bad keys
+  ibv_send_wr write = verbs_util::CreateWriteWr(
+      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
+  write.send_flags |= IBV_SEND_INLINE;
+  verbs_util::PostSend(local.qp, write);
+  (*data_src)[0] = kLocalBufferContent;  // source can be modified immediately
+  data_src.reset();  // src buffer can be deleted immediately after post_send()
+
+  ASSERT_OK_AND_ASSIGN(ibv_wc completion,
+                       verbs_util::WaitForCompletion(local.cq));
+  EXPECT_EQ(completion.status, IBV_WC_SUCCESS);
+  EXPECT_EQ(completion.opcode, IBV_WC_RDMA_WRITE);
+  EXPECT_EQ(completion.qp_num, local.qp->qp_num);
+  EXPECT_EQ(completion.wr_id, 1);
+  EXPECT_THAT(absl::MakeSpan(remote.buffer.data(), valid_inline_size), Each('c'));
+  EXPECT_THAT(absl::MakeSpan(remote.buffer.data() + valid_inline_size,
                              remote.buffer.data() + remote.buffer.size()),
               Each(kRemoteBufferContent));
 }

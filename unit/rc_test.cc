@@ -1560,6 +1560,39 @@ TEST_F(LoopbackRcQpTest, WriteLargeInlineData) {
               Each(kRemoteBufferContent));
 }
 
+TEST_F(LoopbackRcQpTest, WriteExceedMaxInlineData) {
+  uint32_t valid_inline_size, invalid_inline_size;
+  ASSERT_OK_AND_ASSIGN(std::tie(valid_inline_size, invalid_inline_size),
+                       DetermineInlineLimits());
+  Client local, remote;
+  ASSERT_OK_AND_ASSIGN(
+      std::tie(local, remote),
+      CreateConnectedClientsPair(
+          kPages, QpInitAttribute().set_max_inline_data(valid_inline_size)));
+  ASSERT_GE(remote.buffer.size(), valid_inline_size)
+      << "receiver buffer too small";
+  const uint32_t actual_max_inline_data =
+      verbs_util::GetQpCap(local.qp).max_inline_data;
+  // a vector which is not registered to pd or mr
+  auto data_src =
+      std::make_unique<std::vector<uint8_t>>(actual_max_inline_data + 10);
+  std::fill(data_src->begin(), data_src->end(), 'c');
+
+  ibv_sge sge{
+      .addr = reinterpret_cast<uint64_t>(data_src->data()),
+      .length = static_cast<uint32_t>(data_src->size()),
+      .lkey = 0xDEADBEEF,  // random bad keys
+  };
+
+  ibv_send_wr write = verbs_util::CreateWriteWr(
+      /*wr_id=*/1, &sge, /*num_sge=*/1, remote.buffer.data(), remote.mr->rkey);
+  write.send_flags |= IBV_SEND_INLINE;
+  ibv_send_wr* bad_wr;
+  EXPECT_THAT(ibv_post_send(local.qp, &write, &bad_wr),
+              AnyOf(EPERM, ENOMEM, EINVAL));
+  EXPECT_TRUE(verbs_util::ExpectNoCompletion(local.cq));
+}
+
 TEST_F(LoopbackRcQpTest, WriteZeroByteWithImmData) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());

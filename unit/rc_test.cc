@@ -1448,7 +1448,7 @@ TEST_F(LoopbackRcQpTest, UnsignaledWrite) {
 TEST_F(LoopbackRcQpTest, WriteInlineData) {
   Client local, remote;
   ASSERT_OK_AND_ASSIGN(std::tie(local, remote), CreateConnectedClientsPair());
-  const size_t kWriteSize = 36;
+  const size_t kWriteSize = 32;
   ASSERT_GE(remote.buffer.size(), kWriteSize) << "receiver buffer too small";
   // a vector which is not registered to pd or mr
   auto data_src = std::make_unique<std::vector<uint8_t>>(kWriteSize);

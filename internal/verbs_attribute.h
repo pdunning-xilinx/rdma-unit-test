@@ -179,7 +179,7 @@ class QpInitAttribute {
   // TODO(author2): ibv_device_attr does not have a field
   // for device limit on max_inline_data. Hence we use a conservative
   // value that works on all devices. Move this value into NicIntrospection.
-  uint32_t max_inline_data_ = 36;
+  uint32_t max_inline_data_ = 32;
   int sq_sig_all_ = 0;
 };
 

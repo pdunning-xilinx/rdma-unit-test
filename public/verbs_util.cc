@@ -837,6 +837,15 @@ absl::StatusOr<ibv_wc_status> ExecuteType1MwBind(ibv_qp* qp, ibv_mw* mw,
   return completion.status;
 }
 
+// For a type2 MW the rkey shall be updated after it is bound to an MR
+// We do this here as a lot of tests expect the update, even if
+// tests should really make assertions about the actual rkey returned.
+// Doing it here hides the need for it from the tests.
+void update_mw_rkey_after_bind(ibv_mw *mw, uint32_t rkey) {
+    uint32_t ukey_mask = 0xFF;
+    mw->rkey = (mw->rkey & ~ukey_mask) | (rkey & ukey_mask);
+}
+
 absl::StatusOr<ibv_wc_status> ExecuteType2MwBind(ibv_qp* qp, ibv_mw* mw,
                                                  absl::Span<uint8_t> buffer,
                                                  uint32_t rkey, ibv_mr* mr,
@@ -848,6 +857,7 @@ absl::StatusOr<ibv_wc_status> ExecuteType2MwBind(ibv_qp* qp, ibv_mw* mw,
   EXPECT_EQ(completion.wr_id, bind.wr_id);
   EXPECT_EQ(completion.qp_num, qp->qp_num);
   if (completion.status == IBV_WC_SUCCESS) {
+    update_mw_rkey_after_bind(mw, rkey);
     EXPECT_EQ(IBV_WC_BIND_MW, completion.opcode);
   }
   return completion.status;

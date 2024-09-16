@@ -136,10 +136,6 @@ class AccessTestFixture : public RdmaVerbsFixture {
         ASSIGN_OR_RETURN(
             status, verbs_util::ExecuteType2MwBind(qp, mw, memblock.span(),
                                                    ++type2_rkey, mr, access));
-        if (status == IBV_WC_SUCCESS) {
-          uint32_t ukey_mask = 0xff;
-          mw->rkey = (mw->rkey & ~ukey_mask) | (type2_rkey & ukey_mask);
-        }
         break;
       }
       default:

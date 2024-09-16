@@ -858,7 +858,8 @@ class QpPostTest : public RdmaVerbsFixture {
     if (!setup.pd) {
       return absl::InternalError("Failed to allocate pd.");
     }
-    setup.qp = ibv_.CreateQp(setup.pd, setup.cq, IBV_QPT_RC);
+    setup.qp = ibv_.CreateQp(setup.pd, setup.cq, IBV_QPT_RC,
+                             QpInitAttribute().set_max_send_wr(16));
     if (!setup.qp) {
       return absl::InternalError("Failed to create qp.");
     }

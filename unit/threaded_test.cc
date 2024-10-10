@@ -364,7 +364,7 @@ TEST_F(ThreadedTest, CreateCq) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ThreadPool pool;
   const size_t kCqPerThread = std::min(
-      kResourcePerThread, Introspection().device_attr().max_cq / kThreadCount);
+      kResourcePerThread, Introspection().device_attr().max_cq / (2 * kThreadCount));
   LOG(INFO) << "Creating " << kCqPerThread << " Cqs per thread on "
             << kThreadCount << " threads.";
   std::vector<std::vector<ibv_cq*>> cqs(
@@ -395,7 +395,7 @@ TEST_F(ThreadedTest, CreateCqEx) {
   ASSERT_OK_AND_ASSIGN(BasicSetup setup, CreateBasicSetup());
   ThreadPool pool;
   const size_t kCqPerThread = std::min(
-      kResourcePerThread, Introspection().device_attr().max_cq / kThreadCount);
+      kResourcePerThread, Introspection().device_attr().max_cq / (2 * kThreadCount));
   LOG(INFO) << "Creating " << kCqPerThread << " Extended Cqs per thread on "
             << kThreadCount << " threads.";
   std::vector<std::vector<ibv_cq_ex*>> cqs_ex(

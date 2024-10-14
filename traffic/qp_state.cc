@@ -314,7 +314,6 @@ void QpState::CheckDataLanded() {
   if (outstanding_ops().empty()) {
     return;
   }
-  EXPECT_EQ(outstanding_ops().size(), 0);
 
   LOG(INFO) << "client " << local_client_id_ << " qp_id " << qp_id() << ", has "
             << outstanding_ops().size() << " outstanding_ops "

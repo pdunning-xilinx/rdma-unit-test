@@ -32,6 +32,11 @@ Config::OperationProfile MixedRcOpProfile();
 // data + atomic operation types and operation sizes that we most commonly test.
 Config::OperationProfile MixedRcOpProfileWithAtomics();
 
+// Some mixes for just two Op types
+Config::OperationProfile MixedRcReadWriteOpProfile();
+Config::OperationProfile MixedRcReadSendOpProfile();
+Config::OperationProfile MixedRcWriteSendOpProfile();
+
 }  // namespace rdma_unit_test
 
 #endif  // THIRD_PARTY_RDMA_UNIT_TEST_TRAFFIC_OP_PROFILES_H_

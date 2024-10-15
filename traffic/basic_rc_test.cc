@@ -145,10 +145,18 @@ INSTANTIATE_TEST_SUITE_P(
                              ops_in_flight, TestOp::ToString(op_type));
     });
 
+enum class OpMixType {
+  ReadWrite,
+  ReadSend,
+  WriteSend,
+  WithoutAtomics,
+  WithAtomics,
+};
+
 class MixedOpsTest : public BasicRcTest,
                      public testing::WithParamInterface<std::tuple<
                          /*num_qps*/ int, /*num_ops*/ int,
-                         /*ops_in_flight*/ int, /*enable_atomics*/ bool>> {};
+                         /*ops_in_flight*/ int, /*enable_atomics*/ OpMixType>> {};
 
 // This test verifies the correctness of a mixture of op-types and op sizes
 // posted with increasing number of qps and ops inflight.
@@ -157,12 +165,27 @@ TEST_P(MixedOpsTest, Basic) {
   const int kNumOps = std::get<1>(GetParam());
   const int kOpsInFlight = std::get<2>(GetParam());
   std::unique_ptr<RandomizedOperationGenerator> op_generator;
-  if (std::get<3>(GetParam())) {  // atomics enabled.
-    op_generator = std::make_unique<RandomizedOperationGenerator>(
-        MixedRcOpProfileWithAtomics());
-  } else {
-    op_generator =
-        std::make_unique<RandomizedOperationGenerator>(MixedRcOpProfile());
+  switch (std::get<3>(GetParam())) {
+    case OpMixType::WithAtomics: {
+      op_generator = std::make_unique<RandomizedOperationGenerator>(
+          MixedRcOpProfileWithAtomics());
+    }
+    case OpMixType::WithoutAtomics: {
+      op_generator =
+          std::make_unique<RandomizedOperationGenerator>(MixedRcOpProfile());
+    }
+    case OpMixType::ReadWrite: {
+      op_generator =
+          std::make_unique<RandomizedOperationGenerator>(MixedRcReadWriteOpProfile());
+    }
+    case OpMixType::ReadSend: {
+      op_generator =
+          std::make_unique<RandomizedOperationGenerator>(MixedRcReadSendOpProfile());
+    }
+    case OpMixType::WriteSend: {
+      op_generator =
+          std::make_unique<RandomizedOperationGenerator>(MixedRcWriteSendOpProfile());
+    }
   }
   const Config kConfig{
       .num_qps = kNumQps,
@@ -180,15 +203,42 @@ INSTANTIATE_TEST_SUITE_P(
     testing::Combine(/*num_qps=*/testing::Values(1, 100, 1000),
                      /*num_ops=*/testing::Values(100, 1000000),
                      /*ops_in_flight=*/testing::Values(1, 32),
-                     /*enable_atomics=*/testing::Bool()),
+                     /*enable_atomics=*/testing::Values(
+                             OpMixType::ReadWrite,
+                             OpMixType::ReadSend,
+                             OpMixType::WriteSend,
+                             OpMixType::WithoutAtomics,
+                             OpMixType::WithAtomics
+			     )),
     [](const testing::TestParamInfo<MixedOpsTest::ParamType>& info) {
       const int num_qps = std::get<0>(info.param);
       const int num_ops = std::get<1>(info.param);
       const int ops_in_flight = std::get<2>(info.param);
-      const bool enable_atomics = std::get<3>(info.param);
-      return absl::StrFormat("%dQps%dOps%dInflight%sAtomics", num_qps, num_ops,
-                             ops_in_flight,
-                             (enable_atomics ? "With" : "Without"));
+      std::string op_types = "";
+      switch (std::get<3>(info.param)) {
+        case OpMixType::WithAtomics: {
+          op_types = "WithAtomics";
+	  break;
+        }
+        case OpMixType::WithoutAtomics: {
+          op_types = "WithoutAtomics";
+	  break;
+        }
+        case OpMixType::ReadWrite: {
+          op_types = "ReadWrite";
+	  break;
+        }
+        case OpMixType::ReadSend: {
+          op_types = "ReadSend";
+	  break;
+        }
+        case OpMixType::WriteSend: {
+          op_types = "WriteSend";
+	  break;
+        }
+      }
+      return absl::StrFormat("%dQps%dOps%dInflight%s", num_qps, num_ops,
+                             ops_in_flight, op_types);
     });
 
 }  // namespace

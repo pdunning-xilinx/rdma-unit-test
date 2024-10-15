@@ -87,4 +87,61 @@ Config::OperationProfile MixedRcOpProfileWithAtomics() {
   return op_profile;
 }
 
+Config::OperationProfile MixedRcReadWriteOpProfile() {
+  Config::OperationProfile op_profile;
+  float size_ratio = 1. / sizeof(kRcMixedOpSizesBytes);
+  for (const int &op_size : kRcMixedOpSizesBytes) {
+    Config::OperationProfile::OpSizeProportion *op_size_proportion =
+        op_profile.add_op_size_proportions();
+    op_size_proportion->set_size_bytes(op_size);
+    op_size_proportion->set_proportion(size_ratio);
+  }
+  float type_ratio = 0.5;  // Each op type should be equally likely.
+  op_profile.mutable_rc_op_profile()
+      ->mutable_op_type_proportions()
+      ->set_read_proportion(type_ratio);
+  op_profile.mutable_rc_op_profile()
+      ->mutable_op_type_proportions()
+      ->set_write_proportion(type_ratio);
+  return op_profile;
+}
+
+Config::OperationProfile MixedRcReadSendOpProfile() {
+  Config::OperationProfile op_profile;
+  float size_ratio = 1. / sizeof(kRcMixedOpSizesBytes);
+  for (const int &op_size : kRcMixedOpSizesBytes) {
+    Config::OperationProfile::OpSizeProportion *op_size_proportion =
+        op_profile.add_op_size_proportions();
+    op_size_proportion->set_size_bytes(op_size);
+    op_size_proportion->set_proportion(size_ratio);
+  }
+  float type_ratio = 0.5;  // Each op type should be equally likely.
+  op_profile.mutable_rc_op_profile()
+      ->mutable_op_type_proportions()
+      ->set_read_proportion(type_ratio);
+  op_profile.mutable_rc_op_profile()
+      ->mutable_op_type_proportions()
+      ->set_send_proportion(type_ratio);
+  return op_profile;
+}
+
+Config::OperationProfile MixedRcWriteSendOpProfile() {
+  Config::OperationProfile op_profile;
+  float size_ratio = 1. / sizeof(kRcMixedOpSizesBytes);
+  for (const int &op_size : kRcMixedOpSizesBytes) {
+    Config::OperationProfile::OpSizeProportion *op_size_proportion =
+        op_profile.add_op_size_proportions();
+    op_size_proportion->set_size_bytes(op_size);
+    op_size_proportion->set_proportion(size_ratio);
+  }
+  float type_ratio = 0.5;  // Each op type should be equally likely.
+  op_profile.mutable_rc_op_profile()
+      ->mutable_op_type_proportions()
+      ->set_send_proportion(type_ratio);
+  op_profile.mutable_rc_op_profile()
+      ->mutable_op_type_proportions()
+      ->set_write_proportion(type_ratio);
+  return op_profile;
+}
+
 }  // namespace rdma_unit_test

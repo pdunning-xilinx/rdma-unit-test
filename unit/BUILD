@@ -213,6 +213,29 @@ cc_library(
 )
 
 cc_library(
+    name = "mrc_test_cc",
+    srcs = ["mrc_test.cc"],
+    deps = [
+        ":loopback_fixture",
+        "//internal:verbs_attribute",
+        "//public:introspection",
+        "//public:rdma_memblock",
+        "//public:status_matchers",
+        "//public:verbs_helper_suite",
+        "//public:verbs_util",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/time",
+        "@com_google_absl//absl/types:span",
+        "@com_google_googletest//:gtest",
+        "@libibverbs",
+    ],
+    alwayslink = 1,
+)
+
+cc_library(
     name = "rc_peer_test_cc",
     srcs = ["rc_peer_test.cc"],
     deps = [
@@ -646,6 +669,18 @@ cc_test(
     deps = [
         ":gunit_main",
         ":rc_test_cc",
+        "@libibverbs",
+    ],
+)
+
+cc_test(
+    name = "mrc_test",
+    srcs = [],
+    linkstatic = 1,
+    shard_count = 2,
+    deps = [
+        ":gunit_main",
+        ":mrc_test_cc",
         "@libibverbs",
     ],
 )

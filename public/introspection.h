@@ -129,6 +129,9 @@ class NicIntrospection {
   // Returns true if the NIC supports RC Queue Pairs.
   virtual bool SupportsRcQp() const { return true; }
 
+  // Returns true if the NIC supports MRC Queue Pairs.
+  virtual bool SupportsMrcQp() const { return true; }
+
   // Returns a optional string indicating whether the NIC has known issue
   // (and should be skipped). The string contains details about the known issue.
   // If the NIC does not have known issue (and the test should proceed

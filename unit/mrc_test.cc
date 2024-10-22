@@ -79,10 +79,10 @@ class LoopbackMrcQpTest : public LoopbackFixture {
     int rc;
 
     ASSIGN_OR_RETURN(Client local,
-                     CreateClient(IBV_QPT_RC, pages, qp_init_attr));
+                     CreateClient(IBV_QPT_DRIVER, pages, qp_init_attr));
     std::fill_n(local.buffer.data(), local.buffer.size(), kLocalBufferContent);
     ASSIGN_OR_RETURN(Client remote,
-                     CreateClient(IBV_QPT_RC, pages, qp_init_attr));
+                     CreateClient(IBV_QPT_DRIVER, pages, qp_init_attr));
     std::fill_n(remote.buffer.data(), remote.buffer.size(),
                 kRemoteBufferContent);
 
@@ -134,11 +134,11 @@ class LoopbackMrcQpTest : public LoopbackFixture {
                                                 1024, 4096, 16536};
     qp_init_attr.set_max_inline_data(kInlineTestSize[0]);
     ASSIGN_OR_RETURN(Client local,
-                     CreateClient(IBV_QPT_RC, kPages, qp_init_attr));
+                     CreateClient(IBV_QPT_DRIVER, kPages, qp_init_attr));
     for (int idx = 1; idx < static_cast<int>(kInlineTestSize.size()); ++idx) {
       ibv_qp_init_attr init_attr =
           qp_init_attr.set_max_inline_data(kInlineTestSize[idx])
-              .GetAttribute(local.cq, local.cq, IBV_QPT_RC);
+              .GetAttribute(local.cq, local.cq, IBV_QPT_DRIVER);
       ibv_qp* qp = ibv_.CreateQp(local.pd, init_attr);
       if (qp == nullptr) {
         return std::make_pair(kInlineTestSize[idx - 1], kInlineTestSize[idx]);
@@ -710,8 +710,8 @@ class RemoteMrcQpStateTest
 
 TEST_P(RemoteMrcQpStateTest, RemoteMrcQpStateTests) {
   RemoteQpStateTestParameter param = GetParam();
-  ASSERT_OK_AND_ASSIGN(Client local, CreateClient(IBV_QPT_RC));
-  ASSERT_OK_AND_ASSIGN(Client remote, CreateClient(IBV_QPT_RC));
+  ASSERT_OK_AND_ASSIGN(Client local, CreateClient(IBV_QPT_DRIVER));
+  ASSERT_OK_AND_ASSIGN(Client remote, CreateClient(IBV_QPT_DRIVER));
   ASSERT_OK(BringUpClientQp(local, IBV_QPS_RTS, remote.port_attr.gid,
                             remote.qp->qp_num, /*timeout_ms*/150));
   ASSERT_OK(BringUpClientQp(remote, param.remote_state, local.port_attr.gid,

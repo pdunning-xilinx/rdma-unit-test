@@ -267,6 +267,35 @@ cc_test(
 )
 
 cc_library(
+    name = "basic_mrc_test_cc",
+    srcs = ["basic_mrc_test.cc"],
+    deps = [
+        ":op_profiles",
+        ":op_types",
+        ":operation_generator",
+        ":rdma_stress_fixture",
+        "//public:status_matchers",
+        "@com_glog_glog//:glog",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_googletest//:gtest",
+    ],
+    alwayslink = 1,
+)
+
+cc_test(
+    name = "basic_mrc_test",
+    timeout = "long",
+    args = [
+    ],
+    linkstatic = 1,
+    deps = [
+        ":basic_mrc_test_cc",
+        "//unit:gunit_main",
+        "@libibverbs",
+    ],
+)
+
+cc_library(
     name = "basic_ud_test_cc",
     srcs = ["basic_ud_test.cc"],
     deps = [

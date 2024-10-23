@@ -668,8 +668,8 @@ class ResponderMrcQpStateTest : public LoopbackFixture,
 };
 
 TEST_P(ResponderMrcQpStateTest, ResponderNotReadyToReceive) {
-  ASSERT_OK_AND_ASSIGN(Client requestor, CreateClient());
-  ASSERT_OK_AND_ASSIGN(Client responder, CreateClient());
+  ASSERT_OK_AND_ASSIGN(Client requestor, CreateClient(IBV_QPT_DRIVER));
+  ASSERT_OK_AND_ASSIGN(Client responder, CreateClient(IBV_QPT_DRIVER));
   ibv_qp_state responder_state = std::get<0>(GetParam());
   ibv_wr_opcode opcode = std::get<1>(GetParam());
 

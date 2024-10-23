@@ -78,6 +78,7 @@ class LoopbackMrcQpTest : public LoopbackFixture {
     struct verbs_util::conn_attr local_host, remote_host;
     int rc;
 
+    qp_attr.set_pkey_index(32);
     ASSIGN_OR_RETURN(Client local,
                      CreateClient(IBV_QPT_DRIVER, pages, qp_init_attr));
     std::fill_n(local.buffer.data(), local.buffer.size(), kLocalBufferContent);

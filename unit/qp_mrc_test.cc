@@ -47,7 +47,7 @@ class MrcQpTest : public RdmaVerbsFixture {
  public:
   int InitRcQP(ibv_qp* qp) const {
     PortAttribute port_attr = ibv_.GetPortAttribute(qp->context);
-    ibv_qp_attr mod_init = QpAttribute().GetRcResetToInitAttr(port_attr.port);
+    ibv_qp_attr mod_init = QpAttribute().set_pkey_index(32).GetRcResetToInitAttr(port_attr.port);
     int mask = QpAttribute().GetRcResetToInitMask();
     return ibv_modify_qp(qp, &mod_init, mask);
   }

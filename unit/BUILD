@@ -329,6 +329,30 @@ cc_library(
 )
 
 cc_library(
+    name = "qp_mrc_test_cc",
+    srcs = ["qp_mrc_test.cc"],
+    deps = [
+        ":loopback_fixture",
+        ":rdma_verbs_fixture",
+        "//internal:handle_garble",
+        "//internal:verbs_attribute",
+        "//public:introspection",
+        "//public:rdma_memblock",
+        "//public:status_matchers",
+        "//public:verbs_helper_suite",
+        "//public:verbs_util",
+        "@com_glog_glog//:glog",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/time",
+        "@com_google_googletest//:gtest",
+        "@libibverbs",
+    ],
+    alwayslink = 1,
+)
+
+cc_library(
     name = "srq_test_cc",
     srcs = ["srq_test.cc"],
     deps = [
@@ -677,6 +701,17 @@ cc_test(
     deps = [
         ":gunit_main",
         ":qp_test_cc",
+        "@libibverbs",
+    ],
+)
+
+cc_test(
+    name = "qp_mrc_test",
+    srcs = [],
+    linkstatic = 1,
+    deps = [
+        ":gunit_main",
+        ":qp_mrc_test_cc",
         "@libibverbs",
     ],
 )

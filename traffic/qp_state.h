@@ -73,6 +73,7 @@ class QpState : public QpOpInterface {
           int max_outstanding_ops);
   ~QpState() override = default;
   virtual bool is_rc() const = 0;
+  virtual bool is_mrc() const = 0;
 
   // Prints all properties of the qp to a string.
   std::string DumpState() const;
@@ -273,6 +274,7 @@ class RcQpState : public QpState {
   ~RcQpState() override = default;
 
   bool is_rc() const override { return true; }
+  bool is_mrc() const override { return false; }
 
   QpOpInterface* remote_qp_state() const override { return remote_qp_state_; }
 
@@ -286,12 +288,33 @@ class RcQpState : public QpState {
   QpOpInterface* remote_qp_state_ = nullptr;
 };
 
+class MrcQpState : public QpState {
+ public:
+  using QpState::QpState;
+  ~MrcQpState() override = default;
+
+  bool is_rc() const override { return true; }
+  bool is_mrc() const override { return true; }
+
+  QpOpInterface* remote_qp_state() const override { return remote_qp_state_; }
+
+  void set_remote_qp_state(QpOpInterface* remote_qp_state) override {
+    remote_qp_state_ = remote_qp_state;
+  }
+
+  std::string ToString() const override;
+
+  private:
+    QpOpInterface* remote_qp_state_ = nullptr;
+};
+
 class UdQpState : public QpState {
  public:
   using QpState::QpState;
-  ~UdQpState() override = default;
+  virtual ~UdQpState() {};
 
   bool is_rc() const override { return false; }
+  bool is_mrc() const override { return false; }
 
   void add_ud_destination(QpOpInterface* remote_qp_state, ibv_ah* ah) override {
     UdDestination dest{.ah = ah, .qp_state = remote_qp_state};

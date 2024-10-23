@@ -53,6 +53,12 @@ class RdmaStressFixture : public BasicFixture {
                         uint16_t qps_per_client,
                         QpAttribute qp_attr = QpAttribute());
 
+  // Creates number of qps_per_client RC qps for each client and connects pairs
+  // across the two clients.
+  void CreateSetUpMrcQps(Client& initiator, Client& target,
+                        uint16_t qps_per_client,
+                        QpAttribute qp_attr = QpAttribute());
+
   // Indicates how address handles should be assigned to queue pairs.
   enum class AddressHandleMapping {
     kIndependent,  // Each src:dst pair has its own address handle.

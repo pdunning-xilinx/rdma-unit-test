@@ -530,6 +530,18 @@ std::string RcQpState::ToString() const {
   return out.str();
 }
 
+std::string MrcQpState::ToString() const {
+  std::stringstream out;
+  out << "MrcQpState:\n";
+  out << DumpState();
+  if (remote_qp_state() != nullptr) {
+    out << " remote_qp_id: " << remote_qp_state()->qp_id() << "\n";
+  } else {
+    out << " remote_qp_id: Not Connected\n";
+  }
+  return out.str();
+}
+
 std::string UdQpState::ToString() const {
   std::stringstream out;
   out << "UdQpState:\n";

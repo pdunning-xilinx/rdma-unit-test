@@ -286,7 +286,7 @@ Client::~Client() {
   }
 }
 
-absl::StatusOr<uint32_t> Client::CreateQp(bool is_rc,
+absl::StatusOr<uint32_t> Client::CreateQp(bool is_rc, bool is_mrc,
                                           QpInitAttribute qp_init_attribute) {
   if (qps_.size() == max_qps_)
     return absl::OutOfRangeError(
@@ -294,7 +294,10 @@ absl::StatusOr<uint32_t> Client::CreateQp(bool is_rc,
 
   ibv_qp* qp;
   if (is_rc) {
-    qp = ibv_.CreateQp(pd_, send_cq_, recv_cq_, IBV_QPT_RC, qp_init_attribute);
+    if( is_mrc )
+      qp = ibv_.CreateQp(pd_, send_cq_, recv_cq_, IBV_QPT_DRIVER, qp_init_attribute);
+    else
+      qp = ibv_.CreateQp(pd_, send_cq_, recv_cq_, IBV_QPT_RC, qp_init_attribute);
 
     CHECK(qp);  // Crash OK
   } else {
@@ -305,7 +308,13 @@ absl::StatusOr<uint32_t> Client::CreateQp(bool is_rc,
   uint32_t qp_id = qps_.size();
   absl::Span<uint8_t> qp_src_buf = GetQpSrcBuffer(qp_id).span();
   absl::Span<uint8_t> qp_dest_buf = GetQpDestBuffer(qp_id).span();
-  if (is_rc) {
+  if (is_mrc) {
+    auto qp_state =
+        std::make_unique<MrcQpState>(client_id_, qp, qp_id, is_rc, qp_src_buf,
+                                    qp_dest_buf, max_outstanding_ops_per_qp_);
+    SetQpKeys(qp_state.get(), src_mr_[0], dest_mr_[0]);
+    qps_[qp_id] = std::move(qp_state);
+  } else if (is_rc) {
     auto qp_state =
         std::make_unique<RcQpState>(client_id_, qp, qp_id, is_rc, qp_src_buf,
                                     qp_dest_buf, max_outstanding_ops_per_qp_);

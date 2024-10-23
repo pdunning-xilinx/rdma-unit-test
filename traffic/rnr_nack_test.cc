@@ -40,12 +40,12 @@ class RnrNackTest : public RdmaStressFixture {
   void CreateAndConnectQp(Client &initiator, Client &target,
                           QpAttribute qp_attr) {
     CHECK_OK(initiator.CreateQp(
-        /*is_rc=*/true,
+        /*is_rc=*/true, false,
         QpInitAttribute()
             .set_max_send_wr(kInitiatorSendQueueSize)
             .set_max_recv_wr(kInitiatorRecvQueueSize)));  // Crash OK
     CHECK_OK(target.CreateQp(
-        /*is_rc=*/true,
+        /*is_rc=*/true, false,
         QpInitAttribute()
             .set_max_send_wr(kTargetSendQueueSize)
             .set_max_recv_wr(kTargetRecvQueueSize)));  // Crash OK

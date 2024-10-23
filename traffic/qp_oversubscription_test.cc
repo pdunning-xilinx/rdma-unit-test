@@ -76,8 +76,8 @@ TEST_P(QpOversubscriptionTest, StressTest) {
     // Create a set of qp_each_step qps and assign them to the same stat_set.
     for (int i = 0; i < qps_each_step; ++i) {
       absl::StatusOr<uint32_t> initiator_qp_id =
-          initiator.CreateQp(/*is_rc=*/true);
-      absl::StatusOr<uint32_t> target_qp_id = target.CreateQp(/*is_rc=*/true);
+          initiator.CreateQp(/*is_rc=*/true, false);
+      absl::StatusOr<uint32_t> target_qp_id = target.CreateQp(/*is_rc=*/true, false);
       ASSERT_OK(initiator_qp_id);  // Crash OK
       ASSERT_OK(target_qp_id);     // Crash OK
 

@@ -137,7 +137,7 @@ class Client {
   // other qps. 'is_rc' specifies whether the qps are in rc mode or ud mode.
   // Returns OutOfRangeError if creating the qp goes over max_qps_per_client.
   absl::StatusOr<uint32_t> CreateQp(
-      bool is_rc, QpInitAttribute qp_init_attribute = QpInitAttribute());
+      bool is_rc, bool is_mrc, QpInitAttribute qp_init_attribute = QpInitAttribute());
   absl::Status DeleteQp(uint32_t qp_id);
 
   // Create an address handle and store it in the Client. Since the RDMA unit

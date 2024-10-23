@@ -314,8 +314,8 @@ TEST_F(SimpleRdmaTest, UdSend) {
   Client initiator(/*client_id=*/0, context(), port_attr(), kClientConfig),
       target(/*client_id=*/1, context(), port_attr(), kClientConfig);
 
-  ASSERT_THAT(initiator.CreateQp(/*is_rc=*/false), IsOk());
-  ASSERT_THAT(target.CreateQp(/*is_rc=*/false), IsOk());
+  ASSERT_THAT(initiator.CreateQp(/*is_rc=*/false, false), IsOk());
+  ASSERT_THAT(target.CreateQp(/*is_rc=*/false, false), IsOk());
 
   ibv_ah *ah = initiator.CreateAh(port_attr());
 

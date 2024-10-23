@@ -100,8 +100,29 @@ void RdmaStressFixture::CreateSetUpRcQps(Client& initiator, Client& target,
                                          QpAttribute qp_attr) {
   for (int i = 0; i < qps_per_client; ++i) {
     absl::StatusOr<uint32_t> initiator_qp_id =
-        initiator.CreateQp(/*is_rc=*/true);
-    absl::StatusOr<uint32_t> target_qp_id = target.CreateQp(/*is_rc=*/true);
+        initiator.CreateQp(/*is_rc=*/true, false);
+    absl::StatusOr<uint32_t> target_qp_id = target.CreateQp(/*is_rc=*/true, false);
+    CHECK_OK(initiator_qp_id);  // Crash OK.
+    CHECK_OK(target_qp_id);     // Crash OK.
+
+    // Set up Qpairs.
+    EXPECT_OK(SetUpRcClientsQPs(&initiator, initiator_qp_id.value(), &target,
+                                target_qp_id.value(), qp_attr));
+    EXPECT_OK(SetUpRcClientsQPs(&target, target_qp_id.value(), &initiator,
+                                initiator_qp_id.value(), qp_attr));
+  }
+  LOG(INFO) << "Successfully created " << qps_per_client
+            << " new qps per client. Total qps: "
+            << initiator.num_qps() + target.num_qps();
+}
+
+void RdmaStressFixture::CreateSetUpMrcQps(Client& initiator, Client& target,
+                                         uint16_t qps_per_client,
+                                         QpAttribute qp_attr) {
+  for (int i = 0; i < qps_per_client; ++i) {
+    absl::StatusOr<uint32_t> initiator_qp_id =
+        initiator.CreateQp(/*is_rc=*/true, true);
+    absl::StatusOr<uint32_t> target_qp_id = target.CreateQp(/*is_rc=*/true, true);
     CHECK_OK(initiator_qp_id);  // Crash OK.
     CHECK_OK(target_qp_id);     // Crash OK.
 
@@ -121,8 +142,8 @@ void RdmaStressFixture::CreateSetUpOneToOneUdQps(Client& initiator,
                                                  uint16_t qps_per_client) {
   for (uint32_t i = 0; i < qps_per_client; ++i) {
     absl::StatusOr<uint32_t> initiator_qp_id =
-        initiator.CreateQp(/*is_rc=*/false);
-    absl::StatusOr<uint32_t> target_qp_id = target.CreateQp(/*is_rc=*/false);
+        initiator.CreateQp(/*is_rc=*/false, false);
+    absl::StatusOr<uint32_t> target_qp_id = target.CreateQp(/*is_rc=*/false, false);
 
     CHECK_OK(initiator_qp_id);  // Crash OK
     CHECK_OK(target_qp_id);     // Crash OK
@@ -143,12 +164,12 @@ void RdmaStressFixture::CreateSetUpMultiplexedUdQps(
   // Create initiator and target QPs.
   for (uint32_t i = 0; i < initiator_qps; ++i) {
     absl::StatusOr<uint32_t> initiator_qp_id =
-        initiator.CreateQp(/*is_rc=*/false);
+        initiator.CreateQp(/*is_rc=*/false, false);
     CHECK_OK(initiator_qp_id);  // Crash OK
     initiator_qp_ids.push_back(initiator_qp_id.value());
   }
   for (uint32_t i = 0; i < target_qps; ++i) {
-    absl::StatusOr<uint32_t> target_qp_id = target.CreateQp(/*is_rc=*/false);
+    absl::StatusOr<uint32_t> target_qp_id = target.CreateQp(/*is_rc=*/false, false);
     CHECK_OK(target_qp_id);  // Crash OK
     target_qp_ids.push_back(target_qp_id.value());
   }

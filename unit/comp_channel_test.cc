@@ -176,11 +176,14 @@ class CompChannelTest : public RdmaVerbsFixture {
     fd_set fds;
     FD_ZERO(&fds);
     FD_SET(channel->fd, &fds);
-    timeval no_block = {.tv_sec = 0, .tv_usec = 0};
+    timeval block = {
+      .tv_sec = 0,
+      .tv_usec=absl::ToInt64Microseconds(kSelectRetryTimeout)
+    };
     absl::Time stop = absl::Now() + kSelectRetryTimeout;
     int result;
     do {
-      result = select(FD_SETSIZE, &fds, nullptr, nullptr, &no_block);
+      result = select(FD_SETSIZE, &fds, nullptr, nullptr, &block);
       LOG_IF(INFO, result < 0) << "select failed error=" << errno;
     } while ((result < 0) && (errno == EINTR) && (absl::Now() < stop));
     return result == 1;

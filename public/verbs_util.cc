@@ -51,6 +51,10 @@ using namespace std::chrono_literals;
 namespace rdma_unit_test {
 namespace verbs_util {
 
+std::string msg_to_string(zmq::message_t& msg) {
+  return std::string(static_cast<const char*>(msg.data()), msg.size());
+}
+
 int VerbsMtuToInt(ibv_mtu mtu) {
   // The enum ibv_mtu use value 1 to 5 for IBV_MTU_256 to IBV_MTU_4096.
   return 128 << mtu;
@@ -491,7 +495,7 @@ void RecvQpDetails(conn_attr& host, zmq::socket_t& socket) {
     LOG(FATAL) << "Server: Couldn't read remote QPN";
   } else {
     uint32_t port_num;
-    std::stringstream(reply.to_string()) >> std::hex >> host.qpn >> host.psn >>
+    std::stringstream(msg_to_string(reply)) >> std::hex >> host.qpn >> host.psn >>
         port_num >> gid >> host.remote_addr >> host.remote_buf_size >>
         host.rkey;
     host.port = uint8_t(port_num);

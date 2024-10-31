@@ -87,6 +87,9 @@ enum class IbvOperations {
 //                          Helper Functions
 //////////////////////////////////////////////////////////////////////////////
 
+// Because we can't rely on the library function in zmq < 4.6
+std::string msg_to_string(zmq::message_t& msg);
+
 // Converts an ibv_mtu to int.
 int VerbsMtuToInt(ibv_mtu mtu);
 

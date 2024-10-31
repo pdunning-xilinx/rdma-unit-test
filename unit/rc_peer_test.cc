@@ -50,6 +50,9 @@
 #include "unit/loopback_fixture.h"
 
 using namespace std::chrono_literals;
+// Use both of these so that we pick up recv_result_t from whichever one it's in
+using namespace zmq;
+using namespace zmq::detail;
 
 namespace rdma_unit_test {
 namespace {
@@ -109,7 +112,7 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
     std::string msg =
         last_sync ? "last_sync" : "sync" + std::to_string(sync_count);
     zmq::message_t reply{};
-    zmq::recv_result_t received;
+    recv_result_t received;
     while (true) {
       if (verbs_util::is_client()) {
         comm_socket.send(zmq::buffer(msg), zmq::send_flags::none);
@@ -122,7 +125,7 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
         socket_failed = true;
       }
       ASSERT_TRUE(received);
-      auto response = reply.to_string();
+      auto response = verbs_util::msg_to_string(reply);
       if (response == msg) {
         break;
       } else if (sync_count == 0 || (last_sync && response != "sync0")) {
@@ -138,7 +141,7 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
 
   std::string swap_data(std::string msg) {
     zmq::message_t reply{};
-    zmq::recv_result_t received;
+    recv_result_t received;
     if (!verbs_util::peer_mode()) {
       return msg;
     }
@@ -149,7 +152,7 @@ class Peer2PeerRcQpTest : public LoopbackFixture {
       received = comm_socket.recv(reply, zmq::recv_flags::none);
       comm_socket.send(zmq::buffer(msg), zmq::send_flags::none);
     }
-    return reply.to_string();
+    return verbs_util::msg_to_string(reply);
   }
 
   absl::StatusOr<std::pair<Client, Client>> CreateConnectedClientsPair(
